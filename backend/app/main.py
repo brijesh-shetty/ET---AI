@@ -52,9 +52,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         environment=settings.environment,
         allow_live_ingest=settings.allow_live_ingest,
         fixtures_path=str(settings.fixtures_path),
-        anthropic_synthesis_model=settings.anthropic_synthesis_model,
-        anthropic_classifier_model=settings.anthropic_classifier_model,
+        gemini_model=settings.gemini_model,
+        gemini_model_fast=settings.gemini_model_fast,
+        gemini_enabled=bool(settings.gemini_api_key),
         ais_stream_enabled=bool(settings.ais_stream_api_key),
+        slack_enabled=bool(settings.slack_webhook_url),
         gdelt_enabled=settings.gdelt_enabled,
     )
     yield

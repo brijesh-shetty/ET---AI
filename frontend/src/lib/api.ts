@@ -231,11 +231,13 @@ export function getBacktestEvents(): Promise<BacktestEvent[]> {
   return request<BacktestEvent[]>({ method: 'GET', url: '/backtest/events' });
 }
 
-export function getBacktestReplay(eventId: string): Promise<BacktestReplayDay[]> {
-  return request<BacktestReplayDay[]>({
+export async function getBacktestReplay(eventId: string): Promise<BacktestReplayDay[]> {
+  const raw = await request<BacktestReplayDay[] | { timeline: BacktestReplayDay[] }>({
     method: 'GET',
     url: `/backtest/${encodeURIComponent(eventId)}/replay`,
   });
+  if (Array.isArray(raw)) return raw;
+  return raw?.timeline ?? [];
 }
 
 export interface StressTestCell {
