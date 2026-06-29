@@ -8,30 +8,42 @@ interface AppState {
   liveFeed: FeedItem[];
   lastFetched: string | null;
   live: boolean;
+  isChatOpen: boolean;
 
   setSelectedCorridor: (c: Corridor | null) => void;
   setSelectedCommodity: (c: Commodity | null) => void;
   setLiveScores: (s: RiskScore[]) => void;
   setLiveFeed: (f: FeedItem[]) => void;
+  pushFeedItem: (item: FeedItem) => void;
   markFetched: () => void;
   setLive: (live: boolean) => void;
+  setChatOpen: (open: boolean) => void;
+  toggleChat: () => void;
   reset: () => void;
 }
 
-export const useAppStore = create<AppState>((set) => ({
+export const useAppStore = create<AppState>((set, get) => ({
   selectedCorridor: null,
   selectedCommodity: null,
   liveScores: [],
   liveFeed: [],
   lastFetched: null,
   live: true,
+  isChatOpen: false,
 
   setSelectedCorridor: (c) => set({ selectedCorridor: c }),
   setSelectedCommodity: (c) => set({ selectedCommodity: c }),
   setLiveScores: (s) => set({ liveScores: s, lastFetched: new Date().toISOString() }),
   setLiveFeed: (f) => set({ liveFeed: f }),
+  pushFeedItem: (item) => {
+    const current = get().liveFeed;
+    const merged = [item, ...current.filter((x) => x.id !== item.id)].slice(0, 50);
+    set({ liveFeed: merged, lastFetched: new Date().toISOString() });
+  },
   markFetched: () => set({ lastFetched: new Date().toISOString() }),
   setLive: (live) => set({ live }),
+  setChatOpen: (open) => set({ isChatOpen: open }),
+  toggleChat: () => set({ isChatOpen: !get().isChatOpen }),
   reset: () =>
     set({
       selectedCorridor: null,
@@ -39,6 +51,7 @@ export const useAppStore = create<AppState>((set) => ({
       liveScores: [],
       liveFeed: [],
       lastFetched: null,
+      isChatOpen: false,
     }),
 }));
 

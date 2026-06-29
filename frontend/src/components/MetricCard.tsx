@@ -12,43 +12,41 @@ interface MetricCardProps {
   subValue?: string;
   tier?: RiskTier;
   trend?: Trend;
+  unit?: string;
 }
 
 const TIER_BORDER: Record<RiskTier, string> = {
-  low: "border-l-emerald-500",
-  elevated: "border-l-amber-500",
-  high: "border-l-orange-500",
-  critical: "border-l-red-600",
+  low: "border-l-op-good",
+  elevated: "border-l-op-warn",
+  high: "border-l-amber-500",
+  critical: "border-l-op-danger",
 };
 
 const TREND_COLOR: Record<Trend["direction"], string> = {
-  up: "text-emerald-400",
-  down: "text-red-400",
-  flat: "text-slate-400",
+  up: "text-op-good",
+  down: "text-op-danger",
+  flat: "text-op-ink3",
 };
 
 const TREND_ARROW: Record<Trend["direction"], string> = {
   up: "▲",
   down: "▼",
-  flat: "─",
+  flat: "·",
 };
 
-export function MetricCard({ label, value, subValue, tier, trend }: MetricCardProps) {
-  const borderClass = tier ? TIER_BORDER[tier] : "border-l-slate-700";
+export function MetricCard({ label, value, subValue, tier, trend, unit }: MetricCardProps) {
+  const borderClass = tier ? `border-l-2 ${TIER_BORDER[tier]}` : "";
 
   return (
-    <div
-      className={`rounded-lg border border-slate-800 ${borderClass} border-l-4 bg-slate-900 p-4`}
-    >
-      <div className="text-xs font-medium uppercase tracking-wider text-slate-500">
-        {label}
-      </div>
+    <div className={`rounded-md border border-op-border bg-op-panel p-4 ${borderClass}`}>
+      <div className="text-micro uppercase tracking-wider text-op-ink3">{label}</div>
       <div className="mt-2 flex items-baseline gap-2">
-        <span className="text-3xl font-semibold tabular-nums text-slate-100">
+        <span className="font-mono text-2xl font-medium tabular-nums tracking-tighter text-op-ink">
           {typeof value === "number" ? value.toFixed(2) : value}
         </span>
+        {unit && <span className="text-micro text-op-ink3">{unit}</span>}
         {trend && (
-          <span className={`text-xs ${TREND_COLOR[trend.direction]}`}>
+          <span className={`font-mono text-meta tabular-nums ${TREND_COLOR[trend.direction]}`}>
             {TREND_ARROW[trend.direction]}{" "}
             {trend.format === "pct"
               ? `${(trend.delta * 100).toFixed(1)}%`
@@ -56,9 +54,7 @@ export function MetricCard({ label, value, subValue, tier, trend }: MetricCardPr
           </span>
         )}
       </div>
-      {subValue && (
-        <div className="mt-1 text-xs text-slate-400">{subValue}</div>
-      )}
+      {subValue && <div className="mt-1 text-meta text-op-ink2">{subValue}</div>}
     </div>
   );
 }

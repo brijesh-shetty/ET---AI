@@ -1,8 +1,27 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&family=Newsreader:ital,wght@1,400;1,500;1,600&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --op-bg: #0a0a0b;
+    --op-panel: #0f0f12;
+    --op-panel2: #15161a;
+    --op-panel3: #1c1d22;
+    --op-border: #1f2024;
+    --op-borderStrong: #2a2c33;
+    --op-ink: #e8e9ed;
+    --op-ink2: #9b9da8;
+    --op-ink3: #5b5d68;
+    --op-accent: #00d4aa;
+    --op-accentSoft: rgba(0, 212, 170, 0.12);
+    --op-warn: #f59e0b;
+    --op-danger: #ef4444;
+    --op-good: #10b981;
+  }
+
   html,
   body,
   #root {
@@ -10,37 +29,115 @@
   }
 
   body {
-    @apply bg-canvas text-slate-100 font-sans antialiased;
-    font-feature-settings: "cv11", "ss01";
+    background-color: var(--op-bg);
+    color: var(--op-ink);
+    font-family: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-feature-settings: "cv11", "ss01", "tnum";
+    letter-spacing: -0.005em;
   }
 
   ::selection {
-    background-color: rgba(99, 102, 241, 0.35);
+    background-color: rgba(0, 212, 170, 0.30);
     color: inherit;
+  }
+
+  /* Native form element baselines that match the op palette */
+  input,
+  select,
+  textarea {
+    color-scheme: dark;
+  }
+
+  /* Subtle scrollbar in dark surfaces */
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: #1f2024;
+    border: 2px solid var(--op-bg);
+    border-radius: 8px;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: #2a2c33;
   }
 }
 
 @layer components {
   .panel {
-    @apply bg-panel border border-border-soft rounded-lg;
+    @apply bg-op-panel border border-op-border rounded-md;
   }
 
   .panel-2 {
-    @apply bg-panel-2 border border-border-soft rounded-lg;
+    @apply bg-op-panel2 border border-op-border rounded-md;
+  }
+
+  .panel-3 {
+    @apply bg-op-panel3 border border-op-borderStrong rounded-md;
+  }
+
+  .label-micro {
+    @apply text-micro uppercase tracking-wider text-op-ink3;
   }
 
   .stat-label {
-    @apply text-[11px] uppercase tracking-[0.14em] text-slate-500;
+    @apply text-micro uppercase tracking-wider text-op-ink3;
   }
 
   .stat-value {
-    @apply text-2xl font-semibold text-slate-100 tabular-nums;
+    @apply text-2xl font-mono font-medium tabular-nums tracking-tighter text-op-ink;
+  }
+
+  .hairline {
+    @apply border-op-border;
+  }
+
+  .hairline-strong {
+    @apply border-op-borderStrong;
+  }
+
+  .btn-ghost {
+    @apply rounded-md border border-op-borderStrong bg-transparent px-3 py-1.5 text-sm text-op-ink hover:bg-op-panel2 transition-colors duration-150;
+  }
+
+  .btn-accent {
+    @apply rounded-md border border-op-accent bg-op-accentSoft px-3 py-1.5 text-sm font-medium text-op-accent hover:bg-op-accent/15 transition-colors duration-150;
+  }
+
+  .input-op {
+    @apply rounded-md border border-op-border bg-op-bg px-2.5 py-1.5 text-sm text-op-ink placeholder-op-ink3 focus:border-op-accent focus:outline-none focus:ring-1 focus:ring-op-accent;
+  }
+
+  .table-op {
+    @apply w-full text-sm;
+  }
+  .table-op thead th {
+    @apply text-micro uppercase tracking-wider text-op-ink3 font-medium text-left px-3 py-2 border-b border-op-border;
+  }
+  .table-op tbody td {
+    @apply px-3 py-2 border-b border-op-border text-op-ink;
+  }
+  .table-op tbody tr:hover {
+    background-color: var(--op-panel2);
+  }
+  .table-op .num {
+    @apply font-mono tabular-nums text-right;
   }
 }
 
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
 .leaflet-container {
-  background: #0b1220;
+  background: #0b0c0f;
   z-index: 0;
+  font-family: "Inter", system-ui, sans-serif;
 }
 
 .leaflet-pane,
@@ -50,10 +147,11 @@
 }
 
 .leaflet-control-attribution {
-  background: rgba(15, 23, 42, 0.7) !important;
-  color: #94a3b8 !important;
+  background: rgba(15, 15, 18, 0.85) !important;
+  color: #9b9da8 !important;
+  font-size: 10px !important;
 }
 
 .leaflet-control-attribution a {
-  color: #818cf8 !important;
+  color: #00d4aa !important;
 }

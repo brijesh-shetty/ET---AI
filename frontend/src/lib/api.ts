@@ -178,4 +178,142 @@ export function getCommodities(): Promise<CommodityPrice[]> {
   return request<CommodityPrice[]>({ method: 'GET', url: '/commodities' });
 }
 
+export interface CostOfInaction {
+  scenarioId: string;
+  durationDays: number;
+  intensity: number;
+  dailyCostInrCrore: number;
+  cumulativeCostInrCrore: number;
+  gdpImpactBps: number;
+  breakdown: {
+    fuelImportCost: number;
+    gdpLoss: number;
+    refinerySpotPremium: number;
+    fxPassthrough: number;
+  };
+  asOf: string;
+}
+
+export function getCostOfInaction(
+  scenario: string,
+  durationDays = 14,
+  intensity = 0.5,
+): Promise<CostOfInaction> {
+  return request<CostOfInaction>({
+    method: 'GET',
+    url: '/cost-of-inaction',
+    params: { scenario, durationDays, intensity },
+  });
+}
+
+export interface BacktestEvent {
+  id: string;
+  label: string;
+  startDate: string;
+  endDate: string;
+  windowDays: number;
+  commodity: string;
+  corridor: string;
+  summary: string;
+}
+
+export interface BacktestReplayDay {
+  day: number;
+  dateIso: string;
+  corridorScore: number;
+  brentUsd: number;
+  narrative: string;
+  gdeltCount: number;
+  aisAnomaly: number;
+}
+
+export function getBacktestEvents(): Promise<BacktestEvent[]> {
+  return request<BacktestEvent[]>({ method: 'GET', url: '/backtest/events' });
+}
+
+export function getBacktestReplay(eventId: string): Promise<BacktestReplayDay[]> {
+  return request<BacktestReplayDay[]>({
+    method: 'GET',
+    url: `/backtest/${encodeURIComponent(eventId)}/replay`,
+  });
+}
+
+export interface StressTestCell {
+  scenarioId: string;
+  intensity: number;
+  durationDays: number;
+  brentUpliftPct: number;
+  gdpImpactBps: number;
+  sprRunwayDays: number;
+  costInrCrore: number;
+  severity: 'low' | 'elevated' | 'high' | 'critical';
+}
+
+export async function getStressTest(): Promise<StressTestCell[]> {
+  const raw = await request<StressTestCell[] | { cells: StressTestCell[] }>({
+    method: 'GET',
+    url: '/stress-test',
+  });
+  if (Array.isArray(raw)) return raw;
+  return raw?.cells ?? [];
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface ChatResponse {
+  answer: string;
+  citations: Array<{ label: string; source: string }>;
+  generatedAt: string;
+}
+
+export function postChat(question: string, history?: ChatMessage[]): Promise<ChatResponse> {
+  return request<ChatResponse>({
+    method: 'POST',
+    url: '/chat',
+    data: { question, history: history ?? [] },
+  });
+}
+
+export interface SanctionAlertItem {
+  vesselName: string;
+  mmsi?: string;
+  alertType: string;
+  severity: 'high' | 'critical';
+  corridor: string;
+  etaPort?: string;
+  note: string;
+}
+
+export interface TwinStateWithAlerts extends TwinState {
+  sanctionAlerts: SanctionAlertItem[];
+}
+
+export function getTwinStateWithAlerts(): Promise<TwinStateWithAlerts> {
+  return request<TwinStateWithAlerts>({ method: 'GET', url: '/digital-twin/state' });
+}
+
+export interface SlackPayload {
+  title: string;
+  body: string;
+  severity?: 'info' | 'warn' | 'critical';
+}
+
+export interface SlackResponse {
+  sent: boolean;
+  reason?: string;
+  messageTs?: string;
+  dryRun?: unknown;
+}
+
+export function postSlack(payload: SlackPayload): Promise<SlackResponse> {
+  return request<SlackResponse>({
+    method: 'POST',
+    url: '/integrations/slack',
+    data: payload,
+  });
+}
+
 export default client;

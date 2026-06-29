@@ -5,55 +5,68 @@ import {
   getFeed,
   getScenarios,
   getScores,
+  getTwinStateWithAlerts,
+  postSlack,
+  type ScenarioMeta,
+  type SanctionAlertItem,
 } from "@/lib/api";
-import { fmtNumber, fmtPct, fmtTime, tierAccent } from "@/lib/fmt";
-import { RiskTicker } from "@/components/RiskTicker";
+import { connectFeedWebSocket } from "@/lib/ws";
+import { useAppStore } from "@/lib/store";
 import {
   COMMODITY_LABEL,
   CORRIDOR_LABEL,
+  scoreToTier,
   type Corridor,
   type ExecutiveBrief,
   type FeedItem,
   type RiskScore,
   type RiskTier,
 } from "@/lib/types";
+import { RiskTicker } from "@/components/RiskTicker";
+import { SanctionAlertBanner } from "@/components/SanctionAlert";
 
-interface ScenarioMeta {
-  name: string;
-  label: string;
-  description: string;
-  primary_commodity: string;
-  primary_corridor: Corridor;
-}
-
-const HERO_CORRIDORS: Corridor[] = [
-  "hormuz",
-  "bab_el_mandeb",
-  "malacca",
-  "south_china_sea",
-];
+const HERO_CORRIDORS: Corridor[] = ["hormuz", "bab_el_mandeb", "malacca", "south_china_sea"];
 
 const HERO_TITLE: Record<Corridor, string> = {
   hormuz: "Hormuz",
   bab_el_mandeb: "Bab el-Mandeb",
   malacca: "Malacca",
-  south_china_sea: "China route",
+  south_china_sea: "South China Sea",
   cape_of_good_hope: "Cape",
   suez: "Suez",
 };
 
+const TIER_DOT: Record<RiskTier, string> = {
+  low: "bg-op-good",
+  elevated: "bg-op-warn",
+  high: "bg-amber-500",
+  critical: "bg-op-danger",
+};
+
+const TIER_TEXT: Record<RiskTier, string> = {
+  low: "text-op-good",
+  elevated: "text-op-warn",
+  high: "text-amber-300",
+  critical: "text-op-danger",
+};
+
 const REFRESH_MS = 60_000;
 
-function aggregateCorridor(scores: RiskScore[], corridor: Corridor): {
-  score: number;
-  tier: RiskTier;
-  drivers: string[];
-} | null {
+function aggregateCorridor(scores: RiskScore[], corridor: Corridor) {
   const subset = scores.filter((s) => s.corridor === corridor);
   if (subset.length === 0) return null;
   const top = subset.reduce((a, b) => (a.score >= b.score ? a : b));
   const drivers = Array.from(new Set(subset.flatMap((s) => s.drivers ?? []))).slice(0, 3);
   return { score: top.score, tier: top.tier, drivers };
+}
+
+function fmtTimeUtc(iso: string | null): string {
+  if (!iso) return "--";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "--";
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${hh}:${mm} UTC`;
 }
 
 function MetricCard({
@@ -67,30 +80,28 @@ function MetricCard({
   tier: RiskTier | null;
   drivers: string[];
 }) {
-  const accent = tier ? tierAccent(tier) : { border: "border-slate-800", text: "text-slate-400", dot: "bg-slate-600" };
+  const t = tier ?? "low";
   return (
-    <div className={`rounded-lg border ${accent.border} bg-slate-900 p-5`}>
+    <div className="rounded-md border border-op-border bg-op-panel p-4">
       <div className="flex items-center justify-between">
-        <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-          {title}
-        </h3>
-        <span className={`h-2.5 w-2.5 rounded-full ${accent.dot}`} />
+        <span className="text-micro uppercase tracking-wider text-op-ink3">{title} risk</span>
+        <span className={`h-1.5 w-1.5 rounded-full ${TIER_DOT[t]}`} />
       </div>
       <div className="mt-3 flex items-baseline gap-2">
-        <span className={`text-3xl font-semibold tabular-nums ${accent.text}`}>
+        <span className={`font-mono tabular-nums tracking-tighter text-2xl ${TIER_TEXT[t]}`}>
           {score === null ? "--" : score.toFixed(0)}
         </span>
-        <span className="text-xs uppercase tracking-wide text-slate-500">
+        <span className="font-mono text-micro uppercase tracking-wider text-op-ink2">
           {tier ?? "no signal"}
         </span>
       </div>
-      <ul className="mt-3 space-y-1 text-xs text-slate-400">
+      <ul className="mt-3 space-y-1 font-mono text-meta text-op-ink3">
         {drivers.length === 0 ? (
-          <li className="text-slate-600">No active drivers</li>
+          <li>No active drivers</li>
         ) : (
-          drivers.map((d, i) => (
+          drivers.slice(0, 3).map((d, i) => (
             <li key={i} className="line-clamp-1">
-              - {d}
+              {d}
             </li>
           ))
         )}
@@ -99,57 +110,67 @@ function MetricCard({
   );
 }
 
-function ScenarioCard({ meta }: { meta: ScenarioMeta }) {
+function ScenarioRow({ s }: { s: ScenarioMeta }) {
   return (
     <Link
-      to={`/scenarios/${meta.name}`}
-      className="block rounded-lg border border-slate-800 bg-slate-900 p-4 transition hover:border-indigo-500/60 hover:bg-slate-800/60"
+      to={`/scenarios/${s.name}`}
+      className="group flex items-center justify-between rounded-md border border-op-border bg-op-panel px-4 py-3 hover:border-op-borderStrong hover:bg-op-panel2 transition-colors duration-150"
     >
-      <div className="flex items-start justify-between gap-2">
-        <h4 className="text-sm font-semibold text-slate-100">{meta.label}</h4>
-        <span className="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-slate-400">
-          {CORRIDOR_LABEL[meta.primary_corridor] ?? meta.primary_corridor}
-        </span>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm text-op-ink">{s.label}</div>
+        <div className="mt-1 flex items-center gap-2">
+          <span className="font-mono text-micro uppercase tracking-wider text-op-ink3">
+            {COMMODITY_LABEL[s.primary_commodity] ?? s.primary_commodity}
+          </span>
+          <span className="text-op-ink3">·</span>
+          <span className="font-mono text-micro uppercase tracking-wider text-op-ink3">
+            {CORRIDOR_LABEL[s.primary_corridor] ?? s.primary_corridor}
+          </span>
+        </div>
       </div>
-      <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-slate-400">
-        {meta.description}
-      </p>
-      <div className="mt-3 text-[11px] uppercase tracking-wider text-indigo-400">
-        Run scenario &rarr;
-      </div>
+      <span className="text-op-ink3 group-hover:text-op-accent transition-colors duration-150">→</span>
     </Link>
   );
 }
 
-function ExecutiveBriefPanel({ brief }: { brief: ExecutiveBrief | null }) {
+function ExecutiveBriefPanel({ brief, onShare }: { brief: ExecutiveBrief | null; onShare?: () => void }) {
   if (!brief) {
     return (
-      <div className="rounded-lg border border-slate-800 bg-slate-900 p-6 text-sm text-slate-500">
+      <div className="rounded-md border border-op-border bg-op-panel p-6 text-sm text-op-ink3">
         Executive brief loading...
       </div>
     );
   }
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900">
-      <div className="flex items-center justify-between border-b border-slate-800 px-5 py-3">
-        <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
-          Daily executive brief
-        </h3>
-        <span className="text-xs text-slate-500">{fmtTime(brief.generatedAt)}</span>
+    <div className="rounded-md border border-op-border bg-op-panel">
+      <div className="flex items-center justify-between border-b border-op-border px-5 py-3">
+        <div>
+          <div className="text-micro uppercase tracking-wider text-op-ink3">Executive brief</div>
+          <h3 className="mt-0.5 font-serif italic text-op-ink text-base">{brief.headline}</h3>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-micro tabular-nums text-op-ink3">
+            {fmtTimeUtc(brief.generatedAt)}
+          </span>
+          {onShare && (
+            <button type="button" className="btn-ghost text-xs" onClick={onShare}>
+              Send to Slack
+            </button>
+          )}
+        </div>
       </div>
       <div className="grid gap-6 px-5 py-5 lg:grid-cols-3">
         <div className="lg:col-span-2">
-          <h4 className="text-lg font-semibold text-slate-100">{brief.headline}</h4>
-          <p className="mt-2 text-sm leading-relaxed text-slate-300">{brief.summary}</p>
+          <p className="text-sm leading-relaxed text-op-ink">{brief.summary}</p>
           {brief.actions && brief.actions.length > 0 && (
-            <div className="mt-4">
-              <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+            <div className="mt-5">
+              <div className="text-micro uppercase tracking-wider text-op-ink3 mb-2">
                 Recommended actions
-              </p>
-              <ul className="mt-2 space-y-1.5 text-sm text-slate-300">
+              </div>
+              <ul className="space-y-2 text-sm text-op-ink">
                 {brief.actions.slice(0, 5).map((a, i) => (
-                  <li key={i} className="flex gap-2">
-                    <span className="text-indigo-400">&bull;</span>
+                  <li key={i} className="flex gap-2 leading-relaxed">
+                    <span className="text-op-accent">›</span>
                     <span>{a}</span>
                   </li>
                 ))}
@@ -158,63 +179,39 @@ function ExecutiveBriefPanel({ brief }: { brief: ExecutiveBrief | null }) {
           )}
         </div>
         <div>
-          <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+          <div className="text-micro uppercase tracking-wider text-op-ink3 mb-2">
             Market snapshot
-          </p>
-          <dl className="mt-2 space-y-1.5 text-sm">
-            <div className="flex justify-between border-b border-slate-800 pb-1">
-              <dt className="text-slate-400">Brent</dt>
-              <dd className="tabular-nums text-slate-200">
-                ${fmtNumber(brief.marketSnapshot?.brentUsd, 2)}
-              </dd>
-            </div>
-            <div className="flex justify-between border-b border-slate-800 pb-1">
-              <dt className="text-slate-400">TTF</dt>
-              <dd className="tabular-nums text-slate-200">
-                {fmtNumber(brief.marketSnapshot?.ttfEurMwh, 2)} EUR/MWh
-              </dd>
-            </div>
-            <div className="flex justify-between border-b border-slate-800 pb-1">
-              <dt className="text-slate-400">INR/USD</dt>
-              <dd className="tabular-nums text-slate-200">
-                {fmtNumber(brief.marketSnapshot?.inrUsd, 2)}
-              </dd>
-            </div>
-            <div className="flex justify-between">
-              <dt className="text-slate-400">Coal AUD</dt>
-              <dd className="tabular-nums text-slate-200">
-                {fmtNumber(brief.marketSnapshot?.coalAud, 2)}
-              </dd>
-            </div>
+          </div>
+          <dl className="space-y-2 text-sm">
+            {[
+              { k: "Brent", v: brief.marketSnapshot?.brentUsd, unit: "USD/bbl" },
+              { k: "TTF", v: brief.marketSnapshot?.ttfEurMwh, unit: "EUR/MWh" },
+              { k: "INR/USD", v: brief.marketSnapshot?.inrUsd, unit: "" },
+              { k: "Coal", v: brief.marketSnapshot?.coalAud, unit: "AUD/t" },
+            ].map((row) => (
+              <div
+                key={row.k}
+                className="flex items-baseline justify-between border-b border-op-border pb-1.5"
+              >
+                <dt className="text-op-ink2">{row.k}</dt>
+                <dd className="font-mono tabular-nums text-op-ink">
+                  {(row.v ?? 0).toFixed(2)}
+                  {row.unit && <span className="ml-1 text-micro text-op-ink3">{row.unit}</span>}
+                </dd>
+              </div>
+            ))}
           </dl>
-          {brief.topRisks && brief.topRisks.length > 0 && (
-            <div className="mt-4">
-              <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
-                Top risks
-              </p>
-              <ul className="mt-2 space-y-1.5 text-xs text-slate-300">
-                {brief.topRisks.slice(0, 4).map((r, i) => (
-                  <li key={i}>
-                    <span className="text-slate-100">
-                      {CORRIDOR_LABEL[r.corridor]} / {COMMODITY_LABEL[r.commodity]}
-                    </span>
-                    <span className="ml-1 text-slate-500">- {r.note}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
         </div>
       </div>
       {brief.citations && brief.citations.length > 0 && (
-        <div className="flex flex-wrap gap-2 border-t border-slate-800 px-5 py-3">
+        <div className="flex flex-wrap gap-2 border-t border-op-border px-5 py-3">
           {brief.citations.map((c, i) => (
             <a
               key={i}
               href={c.url}
               target="_blank"
               rel="noreferrer"
-              className="rounded border border-slate-700 px-2 py-0.5 text-[11px] text-indigo-400 hover:border-indigo-500"
+              className="rounded border border-op-border px-2 py-0.5 font-mono text-micro uppercase tracking-wider text-op-accent hover:border-op-accent transition-colors duration-150"
             >
               {c.label}
             </a>
@@ -230,25 +227,30 @@ export default function Dashboard() {
   const [feed, setFeed] = useState<FeedItem[]>([]);
   const [scenarios, setScenarios] = useState<ScenarioMeta[]>([]);
   const [brief, setBrief] = useState<ExecutiveBrief | null>(null);
+  const [alerts, setAlerts] = useState<SanctionAlertItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loadedAt, setLoadedAt] = useState<string | null>(null);
+  const [shareStatus, setShareStatus] = useState<string | null>(null);
+  const pushFeedItem = useAppStore((s) => s.pushFeedItem);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
       try {
-        const [s, f, c, b] = await Promise.all([
+        const [s, f, c, b, t] = await Promise.all([
           getScores(),
           getFeed(),
           getScenarios(),
           getExecutiveBrief(),
+          getTwinStateWithAlerts(),
         ]);
         if (cancelled) return;
         setScores(s);
         setFeed(f);
         setScenarios(c);
         setBrief(b);
+        setAlerts(t.sanctionAlerts ?? []);
         setLoadedAt(new Date().toISOString());
         setError(null);
       } catch (err) {
@@ -265,78 +267,112 @@ export default function Dashboard() {
     };
   }, []);
 
+  useEffect(() => {
+    const conn = connectFeedWebSocket((item) => {
+      setFeed((cur) => [item, ...cur.filter((x) => x.id !== item.id)].slice(0, 50));
+      pushFeedItem(item);
+    });
+    return () => conn.disconnect();
+  }, [pushFeedItem]);
+
   const heroCards = useMemo(() => {
     return HERO_CORRIDORS.map((corridor) => {
       const agg = aggregateCorridor(scores, corridor);
       return {
-        title: `${HERO_TITLE[corridor]} risk`,
+        corridor,
+        title: HERO_TITLE[corridor],
         score: agg?.score ?? null,
-        tier: agg?.tier ?? null,
+        tier: (agg?.tier ?? scoreToTier(agg?.score ?? 0)) as RiskTier,
         drivers: agg?.drivers ?? [],
       };
     });
   }, [scores]);
 
+  async function shareToSlack() {
+    if (!brief) return;
+    setShareStatus("Sending...");
+    try {
+      const res = await postSlack({
+        title: brief.headline,
+        body: brief.summary,
+        severity: "warn",
+      });
+      setShareStatus(res.sent ? "Sent to Slack ✓" : `Dry-run (${res.reason ?? "no webhook"})`);
+    } catch (e) {
+      setShareStatus(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setTimeout(() => setShareStatus(null), 4000);
+    }
+  }
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto max-w-7xl px-6 py-8">
-        <header className="mb-8 flex items-end justify-between">
-          <div>
-            <p className="text-xs uppercase tracking-[0.2em] text-indigo-400">
-              ET AI Hackathon 2026 / PS2
-            </p>
-            <h1 className="mt-1 text-2xl font-semibold tracking-tight">
-              Energy supply chain resilience
-            </h1>
-            <p className="mt-1 text-sm text-slate-400">
-              Composite risk across maritime corridors, refreshed every {fmtPct(REFRESH_MS / 60_000, 0, "min")}.
-            </p>
-          </div>
-          <div className="text-right text-xs text-slate-500">
-            {loadedAt ? `Last refresh ${fmtTime(loadedAt)}` : "Loading..."}
-            {error && <div className="mt-1 text-red-400">{error}</div>}
-          </div>
-        </header>
+    <div className="flex flex-col gap-5">
+      <header className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <p className="text-micro uppercase tracking-wider text-op-accent">
+            ET AI Hackathon 2026 / PS2
+          </p>
+          <h1 className="mt-1 font-serif italic text-2xl text-op-ink leading-tight">
+            Energy supply chain resilience
+          </h1>
+          <p className="mt-1 text-sm text-op-ink2">
+            Composite risk across maritime corridors. Refresh every 60s; WebSocket push on top.
+          </p>
+        </div>
+        <div className="text-right font-mono text-micro uppercase tracking-wider text-op-ink3">
+          {loadedAt ? `Updated ${fmtTimeUtc(loadedAt)}` : "loading..."}
+          {error && <div className="mt-1 text-op-danger normal-case">{error}</div>}
+          {shareStatus && <div className="mt-1 text-op-accent normal-case">{shareStatus}</div>}
+        </div>
+      </header>
 
-        <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {heroCards.map((c) => (
-            <MetricCard
-              key={c.title}
-              title={c.title}
-              score={c.score}
-              tier={c.tier}
-              drivers={c.drivers}
-            />
-          ))}
-        </section>
+      {alerts.length > 0 && <SanctionAlertBanner alerts={alerts} maxVisible={2} />}
 
-        <section className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <div>
-            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-slate-400">
-              Narrated feed
-            </h2>
-            <RiskTicker items={feed} />
-          </div>
-          <div>
-            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-slate-400">
-              Stress scenarios
-            </h2>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              {scenarios.length === 0 ? (
-                <div className="col-span-2 rounded-lg border border-slate-800 bg-slate-900 p-6 text-sm text-slate-500">
-                  Loading scenarios...
-                </div>
-              ) : (
-                scenarios.slice(0, 8).map((s) => <ScenarioCard key={s.name} meta={s} />)
-              )}
-            </div>
-          </div>
-        </section>
+      <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {heroCards.map((c) => (
+          <MetricCard
+            key={c.corridor}
+            title={c.title}
+            score={c.score}
+            tier={c.tier}
+            drivers={c.drivers}
+          />
+        ))}
+      </section>
 
-        <section className="mt-8">
-          <ExecutiveBriefPanel brief={brief} />
-        </section>
-      </div>
+      <section className="grid grid-cols-1 gap-5 lg:grid-cols-[1.2fr,1fr]">
+        <div>
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="text-micro uppercase tracking-wider text-op-ink3">Narrated feed</h2>
+            <span className="font-mono text-micro tabular-nums text-op-ink3">{feed.length} items</span>
+          </div>
+          <RiskTicker items={feed} />
+        </div>
+        <div>
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="text-micro uppercase tracking-wider text-op-ink3">Stress scenarios</h2>
+            <Link
+              to="/compare"
+              className="font-mono text-micro uppercase tracking-wider text-op-accent hover:underline"
+            >
+              Compare →
+            </Link>
+          </div>
+          <div className="flex flex-col gap-2">
+            {scenarios.length === 0 ? (
+              <div className="rounded-md border border-op-border bg-op-panel p-6 text-sm text-op-ink3">
+                Loading scenarios...
+              </div>
+            ) : (
+              scenarios.slice(0, 7).map((s) => <ScenarioRow key={s.name} s={s} />)
+            )}
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <ExecutiveBriefPanel brief={brief} onShare={shareToSlack} />
+      </section>
     </div>
   );
 }

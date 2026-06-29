@@ -33,9 +33,11 @@ class Settings(BaseSettings):
 
     allow_live_ingest: bool = Field(default=False)
 
-    anthropic_api_key: str | None = Field(default=None)
-    anthropic_synthesis_model: str = Field(default="claude-opus-4-8")
-    anthropic_classifier_model: str = Field(default="claude-haiku-4-5-20251001")
+    gemini_api_key: str | None = Field(default=None)
+    gemini_model: str = Field(default="gemini-2.5-flash")
+    gemini_model_fast: str = Field(default="gemini-2.5-flash-lite-preview-06-17")
+
+    slack_webhook_url: str | None = Field(default=None)
 
     ais_stream_api_key: str | None = Field(default=None)
     ais_stream_url: str = Field(default="wss://stream.aisstream.io/v0/stream")

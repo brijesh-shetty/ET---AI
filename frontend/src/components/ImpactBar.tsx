@@ -33,19 +33,20 @@ export function ImpactBar({
   const safeMax = max <= 0 ? Math.max(Math.abs(value), 1) : max;
   const pct = Math.max(0, Math.min(100, (Math.abs(value) / safeMax) * 100));
   const bad = positiveIsBad ? value > 0 : value < 0;
-  const barColor = bad ? 'bg-red-500/70' : 'bg-emerald-500/70';
+  const barColor = bad ? 'bg-op-danger/70' : 'bg-op-good/70';
+  const textColor = bad ? 'text-op-danger' : 'text-op-good';
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900 p-3">
+    <div className="rounded-md border border-op-border bg-op-panel p-3">
       <div className="flex items-center justify-between gap-2">
-        <span className="text-xs uppercase tracking-wider text-slate-400">{label}</span>
-        <span className={`text-sm font-semibold tabular-nums ${bad ? 'text-red-300' : 'text-emerald-300'}`}>
+        <span className="text-micro uppercase tracking-wider text-op-ink3">{label}</span>
+        <span className={`font-mono text-sm font-medium tabular-nums ${textColor}`}>
           {formatValue(value, format)}
         </span>
       </div>
-      <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+      <div className="mt-2 h-[3px] w-full overflow-hidden rounded-sm bg-op-panel3">
         <div className={`h-full ${barColor}`} style={{ width: `${pct}%` }} />
       </div>
-      {sub && <div className="mt-1.5 text-[11px] text-slate-500">{sub}</div>}
+      {sub && <div className="mt-1.5 text-meta text-op-ink3">{sub}</div>}
     </div>
   );
 }

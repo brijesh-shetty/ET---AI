@@ -5,26 +5,26 @@ interface CommodityBadgeProps {
   size?: 'sm' | 'md';
 }
 
-const COMMODITY_COLOR: Record<Commodity, string> = {
-  crude_oil: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
-  lng: 'bg-sky-500/15 text-sky-300 border-sky-500/30',
-  coking_coal: 'bg-stone-500/15 text-stone-300 border-stone-500/30',
-  lithium: 'bg-fuchsia-500/15 text-fuchsia-300 border-fuchsia-500/30',
-  cobalt: 'bg-blue-500/15 text-blue-300 border-blue-500/30',
-  nickel: 'bg-teal-500/15 text-teal-300 border-teal-500/30',
-  rare_earths: 'bg-violet-500/15 text-violet-300 border-violet-500/30',
-  solar_pv: 'bg-yellow-500/15 text-yellow-300 border-yellow-500/30',
-  uranium: 'bg-lime-500/15 text-lime-300 border-lime-500/30',
-  lpg: 'bg-orange-500/15 text-orange-300 border-orange-500/30',
-  atf: 'bg-cyan-500/15 text-cyan-300 border-cyan-500/30',
+const COMMODITY_TONE: Record<Commodity, string> = {
+  crude_oil: 'border-op-warn/50 text-op-warn',
+  lng: 'border-op-accent/50 text-op-accent',
+  coking_coal: 'border-op-ink3 text-op-ink2',
+  lithium: 'border-fuchsia-400/40 text-fuchsia-300',
+  cobalt: 'border-sky-400/40 text-sky-300',
+  nickel: 'border-teal-400/40 text-teal-300',
+  rare_earths: 'border-violet-400/40 text-violet-300',
+  solar_pv: 'border-yellow-400/40 text-yellow-300',
+  uranium: 'border-lime-400/40 text-lime-300',
+  lpg: 'border-orange-400/40 text-orange-300',
+  atf: 'border-cyan-400/40 text-cyan-300',
 };
 
 export function CommodityBadge({ commodity, size = 'sm' }: CommodityBadgeProps) {
-  const color = COMMODITY_COLOR[commodity] ?? 'bg-slate-700/30 text-slate-300 border-slate-600';
-  const sizing = size === 'sm' ? 'text-[10px] px-1.5 py-0.5' : 'text-xs px-2 py-0.5';
+  const tone = COMMODITY_TONE[commodity] ?? 'border-op-border text-op-ink2';
+  const sizing = size === 'sm' ? 'text-micro px-1.5 py-0.5' : 'text-meta px-2 py-0.5';
   return (
     <span
-      className={`inline-flex items-center rounded border uppercase tracking-wider ${sizing} ${color}`}
+      className={`inline-flex items-center rounded-sm border font-mono uppercase tracking-wider ${sizing} ${tone}`}
     >
       {COMMODITY_LABEL[commodity] ?? commodity}
     </span>

@@ -1,20 +1,20 @@
-"""Anthropic client wrappers for the narrative layer.
+"""Google Gemini client wrappers for the narrative layer.
 
-The LLMClient is an async wrapper around the Anthropic Messages API with two
+The LLMClient is an async wrapper around the google-generativeai SDK with two
 demo-friendly properties:
 
 1. A small in-memory LRU cache keyed on the prompt hash. Repeated runs during a
    pitch demo return instantly without a second network round-trip.
 
-2. A fixture fallback path. When settings.allow_live_ingest is False the client
-   never calls Anthropic and instead returns pre-canned strings loaded from
-   data/fixtures/llm_responses.json. This means the demo works without an
-   ANTHROPIC_API_KEY and without network access.
+2. A fixture fallback path. When settings.allow_live_ingest is False OR no
+   GEMINI_API_KEY is configured, the client never calls Gemini and instead
+   returns pre-canned strings loaded from data/fixtures/llm_responses.json.
 
-Model selection follows the rule given in the project brief:
-  - claude-opus-4-8 for synthesis (scenario narratives, recommendations, brief)
-  - claude-haiku-4-5-20251001 for high-frequency classification and short
-    summarisation (risk summary)
+Model selection:
+  - settings.gemini_model (default gemini-2.5-flash) for synthesis (scenario
+    narratives, recommendations, brief, chat)
+  - settings.gemini_model_fast (default gemini-2.5-flash-lite) for
+    high-frequency classification and short summarisation
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from app.llm.prompts import (
     SYSTEM_ANALYST,
+    build_chat_prompt,
     build_executive_brief_prompt,
     build_recommendation_prompt,
     build_risk_summary_prompt,
@@ -37,16 +38,11 @@ from app.llm.prompts import (
 )
 
 if TYPE_CHECKING:
-    from app.engines.models import (
-        Commodity,
-        RiskScore,
-        ScenarioResult,
-        SourcingOption,
-    )
+    from app.models import Commodity, RiskScore, ScenarioResult, SourcingOption
 
 logger = logging.getLogger(__name__)
 
-_FIXTURE_PATH = Path(__file__).resolve().parents[3] / "data" / "fixtures" / "llm_responses.json"
+_FIXTURE_PATH = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "llm_responses.json"
 _CACHE_MAXSIZE = 64
 _DEFAULT_MAX_TOKENS = 1024
 _BRIEF_MAX_TOKENS = 2048
@@ -67,7 +63,6 @@ def _load_fixture_responses() -> dict[str, str]:
 
 
 def _hash_prompt(model: str, system: str, user: str, max_tokens: int) -> str:
-    """Deterministic cache key spanning model, system, user prompt and limits."""
     h = hashlib.blake2b(digest_size=16)
     h.update(model.encode("utf-8"))
     h.update(b"\x00")
@@ -80,53 +75,51 @@ def _hash_prompt(model: str, system: str, user: str, max_tokens: int) -> str:
 
 
 class LLMClient:
-    """Async Anthropic client with caching and a fixture fallback.
+    """Async Gemini client with caching and a fixture fallback.
 
-    Construction is cheap: the Anthropic SDK client is created lazily on first
-    live call so that the fixture mode does not require the package to be
-    importable beyond the dependency declaration in pyproject.toml.
-
-    The class is not thread-safe. Callers should instantiate one per
-    application process (FastAPI app state is the natural home) and rely on
-    asyncio for concurrency.
+    The google-generativeai SDK is synchronous; we wrap its calls in
+    asyncio.to_thread so the FastAPI event loop is not blocked.
     """
 
-    SYNTHESIS_MODEL = "claude-opus-4-8"
-    CLASSIFIER_MODEL = "claude-haiku-4-5-20251001"
+    DEFAULT_SYNTHESIS_MODEL = "gemini-2.5-flash"
+    DEFAULT_CLASSIFIER_MODEL = "gemini-2.5-flash-lite-preview-06-17"
 
     def __init__(self, settings: Any | None = None) -> None:
         if settings is None:
-            from app.config import get_settings  # local import to avoid a hard dep at import time
+            from app.config import get_settings
 
             settings = get_settings()
         self._settings = settings
-        self._api_key: str | None = getattr(settings, "anthropic_api_key", None)
-        self._synthesis_model: str = getattr(settings, "llm_synthesis_model", self.SYNTHESIS_MODEL)
+        self._api_key: str | None = getattr(settings, "gemini_api_key", None)
+        self._synthesis_model: str = getattr(
+            settings, "gemini_model", self.DEFAULT_SYNTHESIS_MODEL
+        )
         self._classifier_model: str = getattr(
-            settings, "llm_classifier_model", self.CLASSIFIER_MODEL
+            settings, "gemini_model_fast", self.DEFAULT_CLASSIFIER_MODEL
         )
         self._allow_live: bool = bool(getattr(settings, "allow_live_ingest", False))
         self._cache: OrderedDict[str, str] = OrderedDict()
         self._cache_lock = asyncio.Lock()
-        self._client: Any | None = None
+        self._configured = False
 
-    def _get_client(self) -> Any:
-        if self._client is not None:
-            return self._client
+    def _ensure_configured(self) -> Any:
+        """Lazy import + configure of google-generativeai. Returns the genai module."""
         try:
-            from anthropic import AsyncAnthropic
+            import google.generativeai as genai
         except ImportError as exc:
             raise RuntimeError(
-                "anthropic SDK is not installed but live mode is enabled; "
-                "either set ALLOW_LIVE_INGEST=false or install the anthropic package"
+                "google-generativeai is not installed but live mode is enabled; "
+                "either set ALLOW_LIVE_INGEST=false or install google-generativeai"
             ) from exc
         if not self._api_key:
             raise RuntimeError(
-                "ANTHROPIC_API_KEY is unset but live mode is enabled; "
+                "GEMINI_API_KEY is unset but live mode is enabled; "
                 "either configure the key or set ALLOW_LIVE_INGEST=false"
             )
-        self._client = AsyncAnthropic(api_key=self._api_key)
-        return self._client
+        if not self._configured:
+            genai.configure(api_key=self._api_key)
+            self._configured = True
+        return genai
 
     async def _cache_get(self, key: str) -> str | None:
         async with self._cache_lock:
@@ -142,6 +135,9 @@ class LLMClient:
             while len(self._cache) > _CACHE_MAXSIZE:
                 self._cache.popitem(last=False)
 
+    def _is_fixture_mode(self) -> bool:
+        return (not self._allow_live) or (not self._api_key)
+
     async def _complete(
         self,
         *,
@@ -151,21 +147,12 @@ class LLMClient:
         max_tokens: int = _DEFAULT_MAX_TOKENS,
         system: str = SYSTEM_ANALYST,
     ) -> str:
-        """Shared completion path used by every public method.
-
-        Resolution order:
-          1. fixture mode (allow_live_ingest is False) -> return canned text
-          2. cache hit  -> return cached completion
-          3. live call -> Anthropic Messages API, cache and return
-        """
-        if not self._allow_live:
+        """Resolution order: fixture mode → cache → live Gemini call."""
+        if self._is_fixture_mode():
             fixtures = _load_fixture_responses()
             canned = fixtures.get(fixture_key)
             if canned is None:
-                logger.warning(
-                    "no fixture entry for key %s; returning placeholder narrative",
-                    fixture_key,
-                )
+                logger.warning("no fixture entry for key %s", fixture_key)
                 return (
                     f"[fixture {fixture_key} unavailable] live LLM calls are "
                     "disabled in this environment."
@@ -177,29 +164,46 @@ class LLMClient:
         if cached is not None:
             return cached
 
-        client = self._get_client()
-        response = await client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
+        try:
+            genai = self._ensure_configured()
 
-        text = _extract_text(response)
-        await self._cache_put(cache_key, text)
-        return text
+            def _sync_call() -> str:
+                gen_model = genai.GenerativeModel(
+                    model_name=model,
+                    system_instruction=system,
+                )
+                response = gen_model.generate_content(
+                    user_prompt,
+                    generation_config={
+                        "max_output_tokens": max_tokens,
+                        "temperature": 0.4,
+                    },
+                )
+                return _extract_text(response)
+
+            text = await asyncio.to_thread(_sync_call)
+            if not text.strip():
+                raise RuntimeError("empty completion from Gemini")
+            await self._cache_put(cache_key, text)
+            return text
+        except Exception as exc:
+            logger.exception("Gemini call failed (key=%s): %s", fixture_key, exc)
+            fixtures = _load_fixture_responses()
+            canned = fixtures.get(fixture_key, "")
+            if canned:
+                return canned
+            return f"[LLM error] {exc}"
 
     async def summarise_risk(
         self,
         scores: list["RiskScore"],
         events: list[dict[str, Any]],
     ) -> str:
-        """Short situational summary across one or more risk scores. Haiku."""
         prompt = build_risk_summary_prompt(scores, events)
         return await self._complete(
             model=self._classifier_model,
             user_prompt=prompt,
-            fixture_key="summarise_risk",
+            fixture_key="risk_summary",
             max_tokens=_DEFAULT_MAX_TOKENS,
         )
 
@@ -208,12 +212,11 @@ class LLMClient:
         result: "ScenarioResult",
         context: dict[str, Any],
     ) -> str:
-        """Executive narrative for a scenario simulation result. Opus."""
         prompt = build_scenario_narrative_prompt(result, context)
         return await self._complete(
             model=self._synthesis_model,
             user_prompt=prompt,
-            fixture_key="narrate_scenario",
+            fixture_key="scenario_hormuz",
             max_tokens=_DEFAULT_MAX_TOKENS,
         )
 
@@ -223,17 +226,15 @@ class LLMClient:
         options: list["SourcingOption"],
         risk: "RiskScore",
     ) -> str:
-        """Procurement recommendation across sourcing options. Opus."""
         prompt = build_recommendation_prompt(commodity, options, risk)
         return await self._complete(
             model=self._synthesis_model,
             user_prompt=prompt,
-            fixture_key="draft_recommendation",
+            fixture_key="recommendation_crude",
             max_tokens=_DEFAULT_MAX_TOKENS,
         )
 
     async def executive_brief(self, snapshot: dict[str, Any]) -> str:
-        """One-page daily executive brief. Opus, larger token budget."""
         prompt = build_executive_brief_prompt(snapshot)
         return await self._complete(
             model=self._synthesis_model,
@@ -242,23 +243,33 @@ class LLMClient:
             max_tokens=_BRIEF_MAX_TOKENS,
         )
 
+    async def chat(self, question: str, context: dict[str, Any]) -> str:
+        """Conversational endpoint for the ask-the-analyst chat drawer."""
+        prompt = build_chat_prompt(question, context)
+        return await self._complete(
+            model=self._synthesis_model,
+            user_prompt=prompt,
+            fixture_key="chat_default",
+            max_tokens=_DEFAULT_MAX_TOKENS,
+        )
+
 
 def _extract_text(response: Any) -> str:
-    """Pull plain text out of an Anthropic Messages API response.
-
-    The SDK returns a Message whose content is a list of blocks. We
-    concatenate every block of type 'text' in order. Tool-use blocks are
-    ignored because the prompts in this module never enable tool use.
-    """
-    content = getattr(response, "content", None) or []
-    parts: list[str] = []
-    for block in content:
-        block_type = getattr(block, "type", None)
-        if block_type == "text":
-            text = getattr(block, "text", "")
-            if text:
-                parts.append(text)
-    return "".join(parts).strip()
+    """Pull plain text out of a google-generativeai GenerateContentResponse."""
+    text = getattr(response, "text", None)
+    if isinstance(text, str) and text:
+        return text.strip()
+    candidates = getattr(response, "candidates", None) or []
+    parts_out: list[str] = []
+    for c in candidates:
+        content = getattr(c, "content", None)
+        if not content:
+            continue
+        for part in getattr(content, "parts", []) or []:
+            t = getattr(part, "text", None)
+            if isinstance(t, str) and t:
+                parts_out.append(t)
+    return "".join(parts_out).strip()
 
 
 __all__ = ["LLMClient"]

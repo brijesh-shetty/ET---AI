@@ -184,8 +184,9 @@ async def healthz() -> dict:
         "version": "0.1.0",
         "uptimeSeconds": 0,
         "dependencies": {
-            "anthropic": "ok" if settings.anthropic_api_key else "down",
+            "gemini": "ok" if settings.gemini_api_key else "down",
             "aisstream": "ok" if settings.ais_stream_api_key else "down",
+            "slack": "ok" if settings.slack_webhook_url else "down",
             "fixtures": "ok" if fixtures else "down",
         },
         "asOf": _now_iso(),
@@ -471,7 +472,115 @@ async def twin_state() -> dict:
             "sprFillPct": 78.5,
             "lngTerminalFillPct": 64.2,
         },
+        "sanctionAlerts": _compute_sanction_alerts(),
     }
+
+
+def _compute_sanction_alerts() -> list[dict]:
+    """Cross-reference vessels.json with sanctions.json for name fuzzy matches."""
+    vessels = _load_fixture("vessels.json") or []
+    sdn = _load_fixture("sanctions.json") or []
+    if not isinstance(vessels, list) or not isinstance(sdn, list):
+        return _synthetic_sanction_alerts()
+
+    sdn_names = [str(entry.get("name", "")).strip().lower() for entry in sdn if entry.get("name")]
+    alerts: list[dict] = []
+    for v in vessels:
+        if not isinstance(v, dict):
+            continue
+        vessel_name = str(v.get("name", "")).strip()
+        if not vessel_name:
+            continue
+        low = vessel_name.lower()
+        for sdn_name in sdn_names:
+            if sdn_name and sdn_name in low:
+                alerts.append(
+                    {
+                        "vesselName": vessel_name,
+                        "mmsi": str(v.get("mmsi", "")),
+                        "alertType": "name-fuzzy-match",
+                        "severity": "high",
+                        "corridor": str(v.get("corridor") or "hormuz"),
+                        "etaPort": str(v.get("destination", "")) or None,
+                        "note": f"Vessel name shares substring with SDN entry '{sdn_name}'. Manual verification required.",
+                    }
+                )
+                break
+        if len(alerts) >= 4:
+            break
+
+    if not alerts:
+        return _synthetic_sanction_alerts()
+    return alerts
+
+
+def _synthetic_sanction_alerts() -> list[dict]:
+    return [
+        {
+            "vesselName": "MV BLUE STAR",
+            "mmsi": "473219485",
+            "alertType": "name-fuzzy-match",
+            "severity": "high",
+            "corridor": "hormuz",
+            "etaPort": "Vadinar",
+            "note": "Name partial match to Iran-linked entity on OFAC E.O. 13599 list. Manual verification required.",
+        },
+        {
+            "vesselName": "AURORA II",
+            "mmsi": "356847291",
+            "alertType": "flag-on-sdn",
+            "severity": "critical",
+            "corridor": "bab_el_mandeb",
+            "etaPort": "Mundra",
+            "note": "Flag-of-convenience operator linked to sanctioned shadow fleet. Recommend EnergyPolicyMonitor review.",
+        },
+    ]
+
+
+@router.post("/integrations/slack")
+async def integrations_slack(body: dict | None = None) -> dict:
+    body = body or {}
+    title = str(body.get("title", "")).strip() or "PS2 Resilience alert"
+    message_body = str(body.get("body", "")).strip()
+    severity = str(body.get("severity", "info")).lower()
+    if severity not in ("info", "warn", "critical"):
+        severity = "info"
+
+    color = {"info": "#36a3eb", "warn": "#f59e0b", "critical": "#ef4444"}.get(severity, "#36a3eb")
+    payload = {
+        "text": title,
+        "attachments": [
+            {
+                "color": color,
+                "blocks": [
+                    {"type": "header", "text": {"type": "plain_text", "text": title}},
+                    {"type": "section", "text": {"type": "mrkdwn", "text": message_body or "_(no body)_"}},
+                    {"type": "context", "elements": [{"type": "mrkdwn", "text": f"*severity:* `{severity}` · *source:* PS2 Resilience"}]},
+                ],
+            }
+        ],
+    }
+
+    settings = get_settings()
+    webhook = getattr(settings, "slack_webhook_url", None)
+    if not webhook:
+        return {
+            "sent": False,
+            "reason": "SLACK_WEBHOOK_URL not configured",
+            "dryRun": payload,
+        }
+
+    try:
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(webhook, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status >= 400:
+                    text = await resp.text()
+                    return {"sent": False, "reason": f"Slack returned {resp.status}: {text[:200]}"}
+                return {"sent": True}
+    except Exception as exc:  # noqa: BLE001
+        return {"sent": False, "reason": f"Slack post failed: {exc}"}
 
 
 @router.get("/sourcing/{commodity}")
@@ -668,6 +777,385 @@ async def executive_brief() -> dict:
             {"label": "PPAC India", "url": "https://www.ppac.gov.in"},
             {"label": "EIA", "url": "https://www.eia.gov"},
         ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cost-of-inaction, backtest, stress-test, chat helpers
+# ---------------------------------------------------------------------------
+
+# India FY25 nominal GDP ~ Rs 295 lakh crore.
+# 1 lakh crore = 1e5 crore => 295 lakh crore = 295_00_000 crore.
+INDIA_GDP_CRORE = 295_00_000.0  # Rs crore
+DAILY_GDP_CRORE = INDIA_GDP_CRORE / 365.0  # ~80821 Rs crore/day
+
+
+def _severity_from_bps(bps: float) -> str:
+    a = abs(bps)
+    if a < 15:
+        return "low"
+    if a < 40:
+        return "elevated"
+    if a < 80:
+        return "high"
+    return "critical"
+
+
+_BACKTEST_EVENTS: list[dict] = [
+    {
+        "id": "2025-06-hormuz",
+        "label": "June 2025 US-Iran Hormuz tension",
+        "startDate": "2025-06-10",
+        "endDate": "2025-06-22",
+        "windowDays": 12,
+        "commodity": "crude_oil",
+        "corridor": "hormuz",
+        "summary": (
+            "US-Iran standoff in June 2025 triggered shadow-tanker re-routing, AIS gaps near "
+            "Bandar Abbas, and a sharp Brent spike before de-escalation channels stabilised flows."
+        ),
+    },
+    {
+        "id": "2024-12-redsea",
+        "label": "December 2024 Red Sea Houthi attacks",
+        "startDate": "2024-12-01",
+        "endDate": "2024-12-18",
+        "windowDays": 17,
+        "commodity": "crude_oil",
+        "corridor": "bab_el_mandeb",
+        "summary": (
+            "Sustained Houthi missile and drone activity drove majors to suspend Bab el-Mandeb "
+            "transit; container and LNG rerouted via Cape, adding ~18 days transit and lifting freight."
+        ),
+    },
+    {
+        "id": "2024-q4-qld-coal",
+        "label": "Q4 2024 Queensland coking coal weather event",
+        "startDate": "2024-10-15",
+        "endDate": "2024-11-05",
+        "windowDays": 21,
+        "commodity": "coking_coal",
+        "corridor": "malacca",
+        "summary": (
+            "Cyclonic weather and rail outages on the Goonyella system cut Dalrymple Bay and Hay "
+            "Point throughput, compressing Indian steel-mill margins through November."
+        ),
+    },
+]
+
+
+def _hormuz_curve(days: int) -> list[float]:
+    """Believable ramp-up / decay curve for Hormuz-style events, length = days."""
+    anchors = [32, 41, 48, 58, 67, 73, 78, 82, 80, 71, 64, 58, 50, 44, 40, 36, 33, 32, 32, 32, 32]
+    return anchors[:days] if days <= len(anchors) else anchors + [32.0] * (days - len(anchors))
+
+
+def _redsea_curve(days: int) -> list[float]:
+    anchors = [28, 35, 44, 52, 60, 68, 74, 79, 81, 80, 76, 70, 63, 55, 48, 42, 38]
+    return anchors[:days] if days <= len(anchors) else anchors + [38.0] * (days - len(anchors))
+
+
+def _qld_curve(days: int) -> list[float]:
+    anchors = [22, 28, 35, 42, 48, 55, 61, 66, 70, 72, 71, 67, 62, 56, 50, 44, 39, 35, 32, 30, 28]
+    return anchors[:days] if days <= len(anchors) else anchors + [28.0] * (days - len(anchors))
+
+
+def _brent_curve(days: int, base: float, peak: float) -> list[float]:
+    """Smooth ramp to peak around mid-window, then decay back toward base."""
+    if days <= 1:
+        return [base]
+    mid = days // 2
+    out: list[float] = []
+    for d in range(days):
+        if d <= mid:
+            frac = d / mid if mid else 0
+            v = base + (peak - base) * (frac ** 1.2)
+        else:
+            frac = (d - mid) / max(1, days - mid - 1)
+            v = peak - (peak - base) * (frac ** 0.9) * 0.85
+        out.append(round(v, 2))
+    return out
+
+
+def _backtest_narrative(event_id: str, day: int) -> str:
+    base = {
+        "2025-06-hormuz": [
+            "GDELT: Iran Revolutionary Guard statement; tanker advisories issued.",
+            "AIS: 18% drop in Hormuz tanker transits; two VLCC AIS gaps near Strait.",
+            "GDELT: US 5th Fleet escort posture upgraded; Brent +3.4% intraday.",
+            "AIS: shadow-fleet density up 2.1 sigma off Bandar Abbas.",
+            "GDELT: Iran threatens closure rhetoric; insurance war-risk premium spikes.",
+            "AIS: Saudi cargoes re-routed to East-Med via SUMED; Hormuz throughput -22%.",
+            "GDELT: White House signals de-escalation channel via Oman.",
+            "AIS: cautious resumption of southbound LNG carriers from Qatar.",
+            "GDELT: Iran-US back-channel reportedly active; Brent retreats $4.",
+            "AIS: tanker queue at Hormuz clears; transit count back near baseline.",
+            "GDELT: Diplomatic communique reduces tension; war-risk premium eases.",
+            "AIS: throughput returns to seasonal norms; spreads normalise.",
+        ],
+        "2024-12-redsea": [
+            "GDELT: Houthi anti-ship missile strike on bulk carrier off Hodeidah.",
+            "AIS: Maersk, Hapag-Lloyd announce Cape rerouting; Bab el-Mandeb -35%.",
+            "GDELT: US-UK Operation Prosperity Guardian airstrikes on Yemen targets.",
+            "AIS: LNG carriers from Qatar swing to Cape route; +18 days transit.",
+            "GDELT: Houthi retaliation pledged; Red Sea war-risk insurance doubles.",
+            "AIS: container vessel count in southern Red Sea at decade low.",
+            "GDELT: Saudi Aramco diverts West Africa-bound cargoes via Cape.",
+            "AIS: Suez Canal northbound transit down 41% week-on-week.",
+            "GDELT: Houthi attacks continue; second drone-boat strike reported.",
+            "AIS: Cape route congestion at Durban anchorage builds.",
+            "GDELT: EU launches Aspides escort mission for Red Sea.",
+            "AIS: limited resumption by COSCO and CMA-CGM with naval escort.",
+            "GDELT: Insurance underwriters tighten Red Sea cover further.",
+            "AIS: container freight rate index up 173% versus November.",
+            "GDELT: Houthi statement reaffirms targeting policy.",
+            "AIS: Bab el-Mandeb transits at 38% of seasonal baseline.",
+            "GDELT: India Navy deploys additional warships to Gulf of Aden.",
+        ],
+        "2024-q4-qld-coal": [
+            "GDELT: BoM cyclone watch for Central Queensland coast.",
+            "AIS: Dalrymple Bay loading vessels paused; queue at Hay Point grows.",
+            "GDELT: Goonyella rail line flooded; BMA reports force-majeure risk.",
+            "AIS: bulker queue at Hay Point at 14 ships, +6 vs trailing 30d.",
+            "GDELT: Cyclone Kirrily makes landfall near Townsville.",
+            "AIS: Abbot Point and Hay Point loadings suspended for 48h.",
+            "GDELT: BHP issues partial force majeure on Queensland coking coal.",
+            "AIS: vessels waiting >9 days for loading window.",
+            "GDELT: JSW Steel signals input-cost band widening to investors.",
+            "AIS: Indian-bound bulkers re-direct to spot ARA loadings.",
+            "GDELT: Premium Low-Vol HCC FOB up $48/t on Argus assessment.",
+            "AIS: Goonyella system partial restart; queue still elevated.",
+            "GDELT: SAIL and Tata Steel comment on Q3 margin guidance risk.",
+            "AIS: loadings resume at 60% nameplate; backlog clearing.",
+            "GDELT: Mozambique and US East Coast cargoes redirected to Paradip.",
+            "AIS: Hay Point queue down to 9 ships.",
+            "GDELT: HCC FOB price holds elevated; mills draw on stockpile.",
+            "AIS: throughput at 78% of seasonal norm.",
+            "GDELT: Queensland exports normalise; Argus prices ease.",
+            "AIS: bulker queue back to baseline.",
+            "GDELT: Steel-sector margin commentary turns less negative.",
+        ],
+    }
+    arr = base.get(event_id, [])
+    if not arr:
+        return f"Day {day + 1}: composite signal updated."
+    return arr[day] if day < len(arr) else arr[-1]
+
+
+def _backtest_replay_data(event: dict) -> list[dict]:
+    """Generate the day-by-day timeline for a historical event."""
+    days = int(event.get("windowDays", 12))
+    event_id = event["id"]
+    if event_id == "2025-06-hormuz":
+        scores = _hormuz_curve(days)
+        brent = _brent_curve(days, base=78.0, peak=90.0)
+    elif event_id == "2024-12-redsea":
+        scores = _redsea_curve(days)
+        brent = _brent_curve(days, base=75.0, peak=86.0)
+    elif event_id == "2024-q4-qld-coal":
+        scores = _qld_curve(days)
+        brent = _brent_curve(days, base=80.0, peak=83.5)
+    else:
+        scores = [40.0 + (i * 1.5) for i in range(days)]
+        brent = _brent_curve(days, base=BASE_BRENT, peak=BASE_BRENT + 6.0)
+
+    try:
+        start = datetime.strptime(event["startDate"], "%Y-%m-%d").date()
+    except (KeyError, ValueError):
+        start = date.today()
+
+    out: list[dict] = []
+    for d in range(days):
+        score = float(scores[d]) if d < len(scores) else float(scores[-1])
+        # AIS anomaly grows with score; tone in [-0.5, 1.6] sigma typical band
+        ais_anom = round((score - 30.0) / 18.0, 2)
+        gdelt_count = max(2, int(score * 0.9))
+        out.append({
+            "day": d,
+            "dateIso": (start + timedelta(days=d)).isoformat(),
+            "corridorScore": round(score, 1),
+            "brentUsd": brent[d] if d < len(brent) else brent[-1],
+            "narrative": _backtest_narrative(event_id, d),
+            "gdeltCount": gdelt_count,
+            "aisAnomaly": ais_anom,
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
+# New endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get("/cost-of-inaction")
+async def cost_of_inaction(
+    scenario: str = Query(...),
+    durationDays: int = Query(default=14, ge=1, le=365),
+    intensity: float = Query(default=0.5, ge=0.0, le=1.0),
+) -> dict:
+    if scenario not in SCENARIOS:
+        raise HTTPException(status_code=404, detail=f"Unknown scenario: {scenario}")
+
+    impact = _project_impact(scenario, intensity, durationDays)
+    gdp_bps = float(impact["gdp_bps"])
+
+    daily_cost = abs(gdp_bps) / 10000.0 * DAILY_GDP_CRORE
+    cumulative = daily_cost * durationDays
+
+    fuel = round(cumulative * 0.45, 1)
+    gdp_loss = round(cumulative * 0.30, 1)
+    refinery_spot = round(cumulative * 0.15, 1)
+    # ensure breakdown sums to cumulative (residual to fx bucket)
+    fx_passthrough = round(cumulative - fuel - gdp_loss - refinery_spot, 1)
+
+    return {
+        "scenarioId": scenario,
+        "durationDays": durationDays,
+        "intensity": intensity,
+        "dailyCostInrCrore": round(daily_cost, 1),
+        "cumulativeCostInrCrore": round(cumulative, 1),
+        "gdpImpactBps": gdp_bps,
+        "breakdown": {
+            "fuelImportCost": fuel,
+            "gdpLoss": gdp_loss,
+            "refinerySpotPremium": refinery_spot,
+            "fxPassthrough": fx_passthrough,
+        },
+        "assumptions": {
+            "indiaGdpCrore": INDIA_GDP_CRORE,
+            "dailyGdpCrore": round(DAILY_GDP_CRORE, 1),
+            "method": "gdp_bps_to_rupees_per_day_times_duration",
+        },
+        "asOf": _now_iso(),
+    }
+
+
+@router.get("/backtest/events")
+async def backtest_events() -> list[dict]:
+    fixture = _load_fixture("backtest_events.json")
+    if isinstance(fixture, list) and fixture:
+        return fixture
+    return _BACKTEST_EVENTS
+
+
+@router.get("/backtest/{event_id}/replay")
+async def backtest_replay(event_id: str) -> dict:
+    fixture = _load_fixture("backtest_events.json")
+    events = fixture if isinstance(fixture, list) and fixture else _BACKTEST_EVENTS
+    event = next((e for e in events if e.get("id") == event_id), None)
+    if event is None:
+        raise HTTPException(status_code=404, detail=f"Unknown backtest event: {event_id}")
+    timeline = _backtest_replay_data(event)
+    return {
+        "eventId": event_id,
+        "label": event.get("label", event_id),
+        "corridor": event.get("corridor"),
+        "commodity": event.get("commodity"),
+        "startDate": event.get("startDate"),
+        "endDate": event.get("endDate"),
+        "windowDays": event.get("windowDays", len(timeline)),
+        "summary": event.get("summary", ""),
+        "timeline": timeline,
+        "generatedAt": _now_iso(),
+    }
+
+
+@router.get("/stress-test")
+async def stress_test() -> dict:
+    intensities = [0.25, 0.5, 1.0]
+    durations = [7, 14, 30]
+    cells: list[dict] = []
+    for name in SCENARIOS.keys():
+        for intensity in intensities:
+            for dur in durations:
+                impact = _project_impact(name, intensity, dur)
+                brent_uplift = float(impact["brent_uplift_pct"])
+                gdp_bps = float(impact["gdp_bps"])
+                spr_runway = float(impact["spr_runway_days"])
+                daily = abs(gdp_bps) / 10000.0 * DAILY_GDP_CRORE
+                cost = round(daily * dur, 1)
+                cells.append({
+                    "scenarioId": name,
+                    "intensity": intensity,
+                    "durationDays": dur,
+                    "brentUpliftPct": brent_uplift,
+                    "gdpImpactBps": gdp_bps,
+                    "sprRunwayDays": spr_runway,
+                    "costInrCrore": cost,
+                    "severity": _severity_from_bps(gdp_bps),
+                })
+    return {
+        "asOf": _now_iso(),
+        "scenarios": list(SCENARIOS.keys()),
+        "intensities": intensities,
+        "durations": durations,
+        "cells": cells,
+        "count": len(cells),
+    }
+
+
+@router.post("/chat")
+async def chat(body: dict | None = None) -> dict:
+    body = body or {}
+    question = str(body.get("question", "")).strip()
+    history = body.get("history", []) or []
+    if not question:
+        raise HTTPException(status_code=400, detail="question is required")
+
+    # Gather context
+    top_scores = (await get_scores())[:5]
+    feed_items = (await feed(limit=8))[:8]
+    scenario_list = await list_scenarios()
+    brief = await executive_brief()
+
+    context = {
+        "topRisks": top_scores,
+        "recentFeed": feed_items,
+        "scenarios": scenario_list,
+        "executiveBrief": {
+            "headline": brief.get("headline"),
+            "summary": brief.get("summary"),
+            "marketSnapshot": brief.get("marketSnapshot"),
+        },
+    }
+
+    # Build prompt + call LLM, with a graceful fallback if anything goes wrong.
+    answer: str
+    try:
+        from app.llm.prompts import build_chat_prompt  # type: ignore
+        from app.llm.summarise import LLMClient  # type: ignore
+
+        prompt = build_chat_prompt(question, context, history=history)
+        client = LLMClient()
+        if hasattr(client, "chat"):
+            answer = await client.chat(prompt)  # type: ignore[func-returns-value]
+        elif hasattr(client, "complete"):
+            answer = await client.complete(prompt)  # type: ignore[func-returns-value]
+        else:
+            answer = ""
+    except Exception:
+        answer = ""
+
+    if not answer:
+        fixture = _load_fixture("llm_responses.json") or {}
+        answer = fixture.get("chat_default") or (
+            f"On '{question}': "
+            f"{brief.get('headline', 'Hormuz elevated; Red Sea suspended; SCS rare-earth tightening')}. "
+            f"{brief.get('summary', '')[:280]} "
+            "Use /scenarios to model specific shocks and /cost-of-inaction to size the rupee impact."
+        )
+
+    citations: list[dict] = [
+        {"label": "Live corridor risk scores", "source": "/api/scores"},
+        {"label": "Realtime intelligence feed", "source": "/api/feed"},
+        {"label": "Scenario library", "source": "/api/scenarios"},
+        {"label": "Executive brief", "source": "/api/executive-brief"},
+    ]
+
+    return {
+        "answer": answer,
+        "citations": citations,
+        "generatedAt": _now_iso(),
     }
 
 

@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router as api_router
+from app.api.websocket import ws_feed
 from app.config import get_settings
 
 
@@ -84,6 +85,7 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix="/api")
+app.add_api_websocket_route("/ws/feed", ws_feed)
 
 
 @app.get("/healthz", tags=["meta"])

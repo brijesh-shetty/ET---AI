@@ -1,8 +1,8 @@
 """Prompt builders for the LLM narrative layer.
 
-Each builder returns a ready-to-send user-message string. The system prompt is
-exposed separately as SYSTEM_ANALYST so callers can pass it as the system
-parameter on the Anthropic Messages API.
+Each builder returns a ready-to-send prompt string suitable for Gemini. The
+system instruction is exposed separately as SYSTEM_ANALYST so callers can
+prepend it or pass it as the model's system instruction.
 
 The builders are intentionally pure functions over plain inputs. They accept
 domain objects (RiskScore, ScenarioResult, Commodity, SourcingOption) by
@@ -26,36 +26,9 @@ if TYPE_CHECKING:
 
 
 SYSTEM_ANALYST: str = (
-    "You are an India energy supply chain risk analyst. Your audience is the "
-    "Ministry of Petroleum and Natural Gas, Ministry of Steel, Ministry of "
-    "Mines, MNRE and the Department of Atomic Energy, plus operators at IOCL, "
-    "BPCL, HPCL, Petronet LNG, SAIL, Tata Steel, Coal India, and grid-scale "
-    "renewable developers.\n\n"
-    "Scope of commodities: crude oil, LNG and natural gas, coking coal, "
-    "critical minerals (lithium, cobalt, nickel, rare earths), solar PV cells "
-    "and modules, uranium, and refined petroleum products.\n\n"
-    "Scope of corridors: Strait of Hormuz, Bab el-Mandeb and the Red Sea, "
-    "Suez, Cape of Good Hope, Strait of Malacca, South China Sea, and the "
-    "Indian east-coast and west-coast port systems including Vadinar, "
-    "Sikka, Mundra, JNPT, Paradip, Visakhapatnam, Dhamra, Dahej, Hazira, "
-    "Kochi, Dabhol and Ennore.\n\n"
-    "Reference sources you may cite by name when the underlying signal "
-    "supports it: PPAC monthly bulletins, DGMS, Ministry of Steel, USGS "
-    "Mineral Commodity Summaries, GIIGNL, OFAC SDN list, UN and EU "
-    "sanctions, GDELT event records, AISStream vessel observations, EIA, "
-    "and World Bank Pink Sheet.\n\n"
-    "Style rules:\n"
-    "- Be precise. Use numbers from the signals provided. Round to one "
-    "decimal place unless the source value is an integer.\n"
-    "- Cite the specific signal that drives each claim. Format citations "
-    "inline as (source: <name>) or (event_id: <id>).\n"
-    "- Avoid hedging language such as 'may', 'could', 'might' unless the "
-    "data genuinely does not support a stronger statement. When the data "
-    "is conclusive, state it directly.\n"
-    "- Do not invent figures. If a number is not in the input, say the "
-    "signal is unavailable rather than estimating.\n"
-    "- Output is read by senior officials. No filler, no apologies, no "
-    "restating the question."
+    "You are an India energy supply chain risk analyst. Be precise, cite "
+    "signals, avoid hedging. Format your output as plain text without "
+    "markdown headers."
 )
 
 
@@ -91,13 +64,15 @@ def build_risk_summary_prompt(
     corridor and commodity labels. Total length target: 180 to 240 words.
     """
     return (
+        f"{SYSTEM_ANALYST}\n\n"
         "Produce a current-state risk summary for India's energy and "
         "strategic-commodity imports using the signals below.\n\n"
         "RISK SCORES:\n"
         f"{_compact_json(scores)}\n\n"
         "RECENT EVENTS:\n"
         f"{_compact_json(events)}\n\n"
-        "Structure the response as exactly four short paragraphs:\n"
+        "Structure the response as exactly four short paragraphs in plain "
+        "text. Do not use markdown headers, bullets, or bold markers.\n"
         "1. Headline assessment. State the single most material risk right "
         "now and the composite score that supports it.\n"
         "2. Corridor view. Walk through the corridors that appear in the "
@@ -109,7 +84,9 @@ def build_risk_summary_prompt(
         "4. What to watch in the next 24 to 72 hours. Two or three "
         "specific signals, each tied to an event_id when one exists.\n\n"
         "Do not include a preface or sign-off. Begin directly with "
-        "paragraph one."
+        "paragraph one. Cite specific numbers from the inputs. If a figure "
+        "is not in the input, say the signal is unavailable rather than "
+        "estimating."
     )
 
 
@@ -131,6 +108,7 @@ def build_scenario_narrative_prompt(
     cause, impact, mitigation and residual risk.
     """
     return (
+        f"{SYSTEM_ANALYST}\n\n"
         "Write an executive narrative for the following scenario "
         "simulation. The reader will use this to brief a Joint Secretary "
         "within 30 minutes.\n\n"
@@ -138,8 +116,10 @@ def build_scenario_narrative_prompt(
         f"{_compact_json(result)}\n\n"
         "ADDITIONAL CONTEXT:\n"
         f"{_compact_json(context)}\n\n"
-        "Cover the following sections, each as a labelled paragraph. Use "
-        "the exact section headings shown.\n\n"
+        "Cover the following sections, each as a labelled paragraph in "
+        "plain text. Begin each section with its label followed by a "
+        "colon on the same line as the paragraph. Do not use markdown "
+        "headers or bullet markers.\n\n"
         "Cause: what triggers the scenario and which corridors or "
         "supplier countries are implicated. Reference the affected "
         "corridors list verbatim.\n\n"
@@ -179,6 +159,7 @@ def build_recommendation_prompt(
     balances cost, lead time, corridor risk and sanctions exposure.
     """
     return (
+        f"{SYSTEM_ANALYST}\n\n"
         "Recommend a procurement plan for the commodity below given the "
         "available sourcing options and the current risk picture.\n\n"
         "COMMODITY:\n"
@@ -187,17 +168,18 @@ def build_recommendation_prompt(
         f"{_compact_json(options)}\n\n"
         "CURRENT RISK:\n"
         f"{_compact_json(risk)}\n\n"
-        "Deliver the response in three parts.\n\n"
-        "Part 1: Ranked table. List every option in priority order. For "
-        "each row include supplier_country, indian_port, corridor, "
-        "lead_time_days, landed_cost_usd_per_unit, and a one-line reason. "
-        "Use a plain markdown table.\n\n"
-        "Part 2: Primary recommendation. Name the supplier and port pair "
+        "Deliver the response in three parts, written in plain text. Do "
+        "not use markdown headers.\n\n"
+        "Part 1 - Ranked list. List every option in priority order, one "
+        "per line. For each entry include supplier_country, indian_port, "
+        "corridor, lead_time_days, landed_cost_usd_per_unit, and a "
+        "one-line reason.\n\n"
+        "Part 2 - Primary recommendation. Name the supplier and port pair "
         "you recommend procure from first, the volume to lift, and the "
         "expected landed cost. Explain why this option beats the second-"
         "ranked one in concrete terms (cost delta, lead-time delta, "
         "corridor risk delta).\n\n"
-        "Part 3: Guardrails. List any sourcing_options that must be "
+        "Part 3 - Guardrails. List any sourcing_options that must be "
         "excluded because of sanctions_flag or because their corridor "
         "carries a composite risk above 70. Name the specific sanctions "
         "regime (OFAC SDN, UN, EU) when the flag indicates one.\n\n"
@@ -224,10 +206,13 @@ def build_executive_brief_prompt(snapshot: dict[str, Any]) -> str:
     Secretary-level reader can absorb in under three minutes.
     """
     return (
+        f"{SYSTEM_ANALYST}\n\n"
         "Compose the India Energy Supply Chain Daily Brief for today.\n\n"
         "SNAPSHOT:\n"
         f"{_compact_json(snapshot)}\n\n"
-        "Use this exact structure:\n\n"
+        "Use this exact structure in plain text. Each label is followed "
+        "by a colon and then the content. Do not use markdown headers, "
+        "bold markers, or bullet glyphs.\n\n"
         "TOP LINE. One sentence that captures the day's most material "
         "shift in import resilience.\n\n"
         "PRICE DESK. Brent, Dutch TTF, JKM, Newcastle coking coal, "
@@ -256,8 +241,78 @@ def build_executive_brief_prompt(snapshot: dict[str, Any]) -> str:
     )
 
 
+def build_chat_prompt(question: str, context: dict[str, Any]) -> str:
+    """Prompt for an interactive chat answer grounded in supplied context.
+
+    Inputs:
+      question: the user's free-form question, typically asked from the
+                dashboard chat surface.
+      context:  dict that bundles the live state the answer must be grounded
+                in. Expected keys (any may be missing or empty):
+                  current_scores:    list of RiskScore-like dicts with at
+                                     least corridor, commodity, score, tier,
+                                     components, drivers, asOf.
+                  recent_events:     list of feed-like dicts with at least
+                                     id, source, headline, summary,
+                                     publishedAt, corridor, commodity,
+                                     importance.
+                  top_scenarios:     list of scenario meta dicts with at
+                                     least scenarioId, name, corridors,
+                                     commodities, summary.
+                  commodities_basket: the six-commodity slice currently
+                                     tracked on screen, as a list of
+                                     commodity codes or labels.
+
+    The model is constrained to answer ONLY from the supplied context. When
+    the context is insufficient it must say so explicitly with the exact
+    phrase 'Not enough data to answer confidently'.
+    """
+    current_scores = context.get("current_scores") or []
+    recent_events = context.get("recent_events") or []
+    top_scenarios = context.get("top_scenarios") or []
+    commodities_basket = context.get("commodities_basket") or []
+
+    return (
+        f"{SYSTEM_ANALYST}\n\n"
+        "You are answering an interactive question from a procurement or "
+        "policy user looking at the live India energy supply chain "
+        "dashboard. Use ONLY the data in the CONTEXT block below. Do not "
+        "invent figures, suppliers, corridors, scenarios, or events that "
+        "are not present in the context. Do not draw on general knowledge "
+        "beyond labelling and definitions.\n\n"
+        "CONTEXT:\n"
+        "current_scores:\n"
+        f"{_compact_json(current_scores)}\n"
+        "recent_events:\n"
+        f"{_compact_json(recent_events)}\n"
+        "top_scenarios:\n"
+        f"{_compact_json(top_scenarios)}\n"
+        "commodities_basket:\n"
+        f"{_compact_json(commodities_basket)}\n\n"
+        "QUESTION:\n"
+        f"{question}\n\n"
+        "Answer rules:\n"
+        "- Cite specific figures from current_scores. When you reference "
+        "a corridor, include its composite score and tier. When you "
+        "reference a commodity, name it as it appears in "
+        "commodities_basket.\n"
+        "- When you cite an event, include its id or headline from "
+        "recent_events. When you cite a scenario, include its "
+        "scenarioId from top_scenarios.\n"
+        "- Keep the answer focused on the question. Do not produce a "
+        "general situation report unless the question asks for one.\n"
+        "- Plain text only. No markdown headers, no bullets, no bold "
+        "markers. Short paragraphs.\n"
+        "- If the context does not contain enough information to answer "
+        "the question accurately, respond with exactly the sentence: "
+        "Not enough data to answer confidently. You may then add one "
+        "short sentence naming which specific signal would be needed."
+    )
+
+
 __all__ = [
     "SYSTEM_ANALYST",
+    "build_chat_prompt",
     "build_executive_brief_prompt",
     "build_recommendation_prompt",
     "build_risk_summary_prompt",

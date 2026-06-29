@@ -1,24 +1,35 @@
-import { useState } from 'react';
-import type { FeedItem } from '../lib/types';
-import { tierFromImportance } from '../lib/fmt';
-import { RiskBadge } from './RiskBadge';
+import { useState } from "react";
+import type { FeedItem } from "../lib/types";
+import { tierFromImportance } from "../lib/fmt";
 
 interface RiskTickerProps {
   items: FeedItem[];
 }
 
-function formatTime(ts: string | undefined): string {
-  if (!ts) return '--';
+const TIER_STRIPE: Record<string, string> = {
+  low: "bg-op-good",
+  elevated: "bg-op-warn",
+  high: "bg-amber-500",
+  critical: "bg-op-danger",
+};
+
+const TIER_LABEL: Record<string, string> = {
+  low: "text-op-good",
+  elevated: "text-op-warn",
+  high: "text-amber-300",
+  critical: "text-op-danger",
+};
+
+function fmtTimeUtc(iso: string | undefined): string {
+  if (!iso) return "--";
   try {
-    const d = new Date(ts);
-    if (Number.isNaN(d.getTime())) return ts;
-    return d.toLocaleTimeString('en-IN', {
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-    });
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    const hh = String(d.getUTCHours()).padStart(2, "0");
+    const mm = String(d.getUTCMinutes()).padStart(2, "0");
+    return `${hh}:${mm}`;
   } catch {
-    return ts;
+    return iso;
   }
 }
 
@@ -36,62 +47,65 @@ export function RiskTicker({ items }: RiskTickerProps) {
 
   if (!items || items.length === 0) {
     return (
-      <div className="rounded-lg border border-slate-800 bg-slate-900 p-6 text-sm text-slate-500">
+      <div className="rounded-md border border-op-border bg-op-panel p-6 text-sm text-op-ink3">
         No active risk alerts.
       </div>
     );
   }
 
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900">
-      <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
-        <h3 className="text-sm font-semibold uppercase tracking-wider text-slate-300">
-          Risk feed
-        </h3>
-        <span className="flex items-center gap-2 text-xs text-slate-500">
-          <span className="h-2 w-2 animate-pulse rounded-full bg-indigo-500" />
-          live
-        </span>
+    <div className="rounded-md border border-op-border bg-op-panel overflow-hidden">
+      <div className="flex items-center justify-between border-b border-op-border px-4 py-2.5">
+        <h3 className="text-micro uppercase tracking-wider text-op-ink3">Risk feed</h3>
+        <span className="font-mono text-micro tabular-nums text-op-ink3">{items.length}</span>
       </div>
-      <div className="max-h-[28rem] overflow-y-auto divide-y divide-slate-800">
+      <div className="max-h-[28rem] overflow-y-auto divide-y divide-op-border">
         {items.map((item) => {
           const id = item.id ?? `${item.source}-${item.publishedAt}`;
           const tier = tierFromImportance(item.importance);
           const isOpen = expanded.has(id);
           return (
-            <div key={id} className="px-4 py-3 hover:bg-slate-800/40">
+            <div key={id} className="flex hover:bg-op-panel2 transition-colors duration-150">
+              <div className={`w-[3px] shrink-0 ${TIER_STRIPE[tier] ?? "bg-op-ink3"}`} />
               <button
                 type="button"
                 onClick={() => toggle(id)}
-                className="flex w-full items-start gap-3 text-left"
+                className="flex-1 px-4 py-2.5 text-left"
               >
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                    <span>{formatTime(item.publishedAt)}</span>
-                    <RiskBadge tier={tier} score={item.importance * 10} showScore={false} />
-                    {item.source && <span className="text-slate-600">- {item.source}</span>}
-                    {item.commodity && <span className="text-slate-600">- {item.commodity}</span>}
-                  </div>
-                  <p className="mt-1 text-sm text-slate-100 line-clamp-2">{item.headline}</p>
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-micro tabular-nums text-op-ink3">
+                    {fmtTimeUtc(item.publishedAt)}
+                  </span>
+                  <span className="font-mono text-micro uppercase tracking-wider text-op-ink2">
+                    {item.source}
+                  </span>
+                  <span className={`font-mono text-micro uppercase tracking-wider ${TIER_LABEL[tier]}`}>
+                    · {tier}
+                  </span>
+                  {item.commodity && (
+                    <span className="font-mono text-micro uppercase tracking-wider text-op-ink3">
+                      · {item.commodity.replace(/_/g, " ")}
+                    </span>
+                  )}
                 </div>
-              </button>
-              {isOpen && (
-                <div className="ml-1 mt-2 border-l border-slate-800 pl-3">
-                  <p className="text-sm leading-relaxed text-slate-300">{item.summary}</p>
-                  {item.url && (
-                    <div className="mt-2">
+                <p className="mt-1 text-sm text-op-ink line-clamp-2 leading-snug">{item.headline}</p>
+                {isOpen && (
+                  <div className="mt-2 border-l border-op-border pl-3">
+                    <p className="text-sm leading-relaxed text-op-ink2">{item.summary}</p>
+                    {item.url && (
                       <a
                         href={item.url}
                         target="_blank"
                         rel="noreferrer"
-                        className="rounded border border-slate-700 px-2 py-0.5 text-xs text-indigo-400 hover:border-indigo-500"
+                        className="mt-2 inline-block rounded border border-op-border px-2 py-0.5 font-mono text-micro uppercase tracking-wider text-op-accent hover:border-op-accent"
+                        onClick={(e) => e.stopPropagation()}
                       >
-                        {item.source ?? 'Source'}
+                        {item.source}
                       </a>
-                    </div>
-                  )}
-                </div>
-              )}
+                    )}
+                  </div>
+                )}
+              </button>
             </div>
           );
         })}

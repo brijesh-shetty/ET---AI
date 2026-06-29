@@ -9,7 +9,14 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { getScenarios, getSourcing, runScenarioByName, type ScenarioMeta } from '@/lib/api';
+import {
+  getCostOfInaction,
+  getScenarios,
+  getSourcing,
+  runScenarioByName,
+  type CostOfInaction,
+  type ScenarioMeta,
+} from '@/lib/api';
 import {
   CORRIDOR_LABEL,
   COMMODITY_LABEL,
@@ -20,6 +27,7 @@ import { fmtNumber, fmtTime } from '@/lib/fmt';
 import CommodityBadge from '@/components/CommodityBadge';
 import ImpactBar from '@/components/ImpactBar';
 import NarrativeFeed from '@/components/NarrativeFeed';
+import CostStrip from '@/components/CostStrip';
 
 function delta(projected: number, baseline: number): number {
   if (!baseline) return 0;
@@ -32,6 +40,7 @@ export default function ScenarioRun() {
   const [meta, setMeta] = useState<ScenarioMeta | null>(null);
   const [result, setResult] = useState<ScenarioResult | null>(null);
   const [sourcing, setSourcing] = useState<SourcingOption[]>([]);
+  const [cost, setCost] = useState<CostOfInaction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -55,10 +64,16 @@ export default function ScenarioRun() {
         if (cancelled) return;
         setResult(res);
         try {
-          const src = await getSourcing(match.primary_commodity, 100);
-          if (!cancelled) setSourcing(src);
+          const [src, c] = await Promise.all([
+            getSourcing(match.primary_commodity, 100),
+            getCostOfInaction(name as string, 14, 0.5),
+          ]);
+          if (!cancelled) {
+            setSourcing(src);
+            setCost(c);
+          }
         } catch {
-          // sourcing is supplementary - non-fatal
+          // supplementary calls non-fatal
         }
         setError(null);
       } catch (err) {
@@ -192,11 +207,13 @@ export default function ScenarioRun() {
             </div>
           </section>
 
+          {cost && <CostStrip cost={cost} />}
+
           <NarrativeFeed
             title="Analyst narrative"
             body={result.recommendations.join('\n\n')}
             generatedAt={result.generatedAt}
-            model="claude-opus-4-8"
+            model="gemini-2.5-flash"
           />
 
           {sourcing.length > 0 && meta && (
