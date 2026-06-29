@@ -26,12 +26,14 @@ from tenacity import (
     wait_exponential,
 )
 
-from app.config import settings
+from app.config import get_settings
+
+settings = get_settings()
 
 log = structlog.get_logger(__name__)
 
 _OFAC_SDN_XML = "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.XML"
-_FIXTURE_PATH = Path(__file__).resolve().parents[3] / "data" / "fixtures" / "sanctions.json"
+_FIXTURE_PATH = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "sanctions.json"
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=5.0, pool=5.0)
 _MATCH_THRESHOLD = 0.86
 _NAMESPACE = {"sdn": "http://tempuri.org/sdnList.xsd"}

@@ -58,6 +58,39 @@ export function fmtIstClock(d: Date): string {
   }) + ' IST';
 }
 
+const COMMODITY_UNITS: Record<string, { short: string; long: string }> = {
+  crude_oil: { short: 'Mbbl', long: 'million barrels' },
+  lpg: { short: 'kt', long: 'kilotonnes' },
+  atf: { short: 'kt', long: 'kilotonnes' },
+  lng: { short: 'MT', long: 'million tonnes' },
+  coking_coal: { short: 'MT', long: 'million tonnes' },
+  thermal_coal: { short: 'MT', long: 'million tonnes' },
+  lithium: { short: 'kt', long: 'kilotonnes LCE' },
+  cobalt: { short: 'kt', long: 'kilotonnes' },
+  nickel: { short: 'kt', long: 'kilotonnes' },
+  rare_earths: { short: 'kt', long: 'kilotonnes REO' },
+  copper: { short: 'kt', long: 'kilotonnes' },
+  graphite: { short: 'kt', long: 'kilotonnes' },
+  manganese: { short: 'kt', long: 'kilotonnes' },
+  polysilicon: { short: 'kt', long: 'kilotonnes' },
+  silver: { short: 't', long: 'tonnes' },
+  pgm: { short: 'kg', long: 'kilograms' },
+  rock_phosphate: { short: 'MT', long: 'million tonnes' },
+  potash: { short: 'MT', long: 'million tonnes' },
+  solar_pv: { short: 'GW', long: 'gigawatts' },
+  uranium: { short: 'tU', long: 'tonnes uranium' },
+};
+
+export function commodityUnitShort(commodity: string | null | undefined): string {
+  if (!commodity) return '';
+  return COMMODITY_UNITS[commodity]?.short ?? '';
+}
+
+export function commodityUnitLong(commodity: string | null | undefined): string {
+  if (!commodity) return '';
+  return COMMODITY_UNITS[commodity]?.long ?? '';
+}
+
 export function fmtIstDate(iso: string | null | undefined): string {
   if (!iso) return '--';
   const d = new Date(iso);

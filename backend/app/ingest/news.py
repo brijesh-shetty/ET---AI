@@ -22,13 +22,15 @@ from tenacity import (
     wait_exponential,
 )
 
-from app.config import settings
+from app.config import get_settings
+
+settings = get_settings()
 
 log = structlog.get_logger(__name__)
 
 _NEWSAPI_URL = "https://newsapi.org/v2/everything"
 _GDELT_DOC_API = "https://api.gdeltproject.org/api/v2/doc/doc"
-_FIXTURE_PATH = Path(__file__).resolve().parents[3] / "data" / "fixtures" / "news.json"
+_FIXTURE_PATH = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "news.json"
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
 
 

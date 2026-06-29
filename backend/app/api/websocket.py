@@ -154,25 +154,73 @@ def _synthetic_feed_item(seq: int, rng: random.Random) -> dict[str, Any]:
     }
 
 
-async def ws_feed(websocket: WebSocket) -> None:
-    """Push FeedItem dicts to the client every 8 seconds.
+async def _live_gdelt_items(seen: set[str]) -> list[dict[str, Any]]:
+    """Pull fresh GDELT events. Returns FeedItem-shaped dicts not yet pushed."""
+    try:
+        from app.api.routes import gdelt_context_url
+        from app.ingest import gdelt as gdelt_ingest
 
-    Initial frame: small back-fill of items from the fixture so the UI is
-    populated immediately. Then live frames of synthetic alerts.
+        events = await gdelt_ingest.fetch_events(window_hours=2)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ws_feed.live_gdelt_failed", error=str(exc))
+        return []
+
+    out: list[dict[str, Any]] = []
+    for e in events[:20]:
+        evt_id = str(e.get("id") or e.get("url") or e.get("timestamp", ""))
+        if not evt_id or evt_id in seen:
+            continue
+        seen.add(evt_id)
+        tone = float(e.get("tone", 0))
+        out.append({
+            "id": evt_id,
+            "source": "GDELT",
+            "headline": f"{e.get('actor1', 'Event')} - {str(e.get('event_code', ''))[:64]}",
+            "summary": f"Tone {tone}; near {e.get('location', 'unknown')}",
+            "url": gdelt_context_url(e),
+            "publishedAt": e.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            "tags": [str(e.get("theme", ""))],
+            "corridor": None,
+            "commodity": None,
+            "sentiment": "negative" if tone < -3 else "neutral",
+            "importance": max(1, min(10, int(abs(tone) * 1.2))),
+        })
+    return out
+
+
+async def ws_feed(websocket: WebSocket) -> None:
+    """Push FeedItem dicts to the client.
+
+    Initial frame: small back-fill from fixtures so the UI is populated.
+    Then: in live mode (ALLOW_LIVE_INGEST=true), poll real GDELT every 60s
+    and push new events. In fixture mode, fall back to the synthetic
+    8-second loop so the demo still has visible motion offline.
     """
+    settings = get_settings()
+    live = bool(settings.allow_live_ingest)
     await websocket.accept()
     try:
         for item in _fixture_initial_items(limit=5):
             await websocket.send_json(item)
             await asyncio.sleep(0.05)
 
-        rng = random.Random()
-        seq = 0
-        while True:
-            await asyncio.sleep(8.0)
-            seq += 1
-            item = _synthetic_feed_item(seq, rng)
-            await websocket.send_json(item)
+        if live:
+            seen: set[str] = set()
+            poll_interval = 60.0
+            while True:
+                items = await _live_gdelt_items(seen)
+                for it in items:
+                    await websocket.send_json(it)
+                    await asyncio.sleep(0.05)
+                await asyncio.sleep(poll_interval)
+        else:
+            rng = random.Random()
+            seq = 0
+            while True:
+                await asyncio.sleep(8.0)
+                seq += 1
+                item = _synthetic_feed_item(seq, rng)
+                await websocket.send_json(item)
     except WebSocketDisconnect:
         logger.info("ws_feed: client disconnected cleanly")
     except Exception as exc:  # noqa: BLE001

@@ -19,13 +19,15 @@ from pathlib import Path
 import structlog
 import websockets
 
-from app.config import settings
+from app.config import get_settings
+
+settings = get_settings()
 from app.models import Corridor, VesselPing
 
 log = structlog.get_logger(__name__)
 
 _AIS_WS_URL = "wss://stream.aisstream.io/v0/stream"
-_FIXTURE_PATH = Path(__file__).resolve().parents[3] / "data" / "fixtures" / "vessels.json"
+_FIXTURE_PATH = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "vessels.json"
 
 
 async def stream_vessels(corridor: Corridor) -> AsyncIterator[VesselPing]:

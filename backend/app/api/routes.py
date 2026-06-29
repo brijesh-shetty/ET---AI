@@ -898,6 +898,145 @@ DEMAND_SUBSTITUTES: dict[str, dict] = {
 }
 
 
+@router.post("/sourcing/{commodity}/analyse")
+async def sourcing_cascade_analyse(
+    commodity: str,
+    body: dict | None = None,
+) -> dict:
+    """AI cascade-reasoning analysis for a sourcing disruption.
+
+    Replaces the formula-driven ranking with a Gemini-authored chain-reaction
+    walkthrough. Body: {"disruptedCorridor": "hormuz" | null}. Returns
+    structured sections plus the original ranked options for cross-reference.
+    """
+    body = body or {}
+    disrupted = body.get("disruptedCorridor")
+
+    try:
+        sc = sourcing_engine.Commodity(commodity)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Unknown commodity: {commodity}") from exc
+
+    # Reuse the formula-based ranking as input to the LLM
+    try:
+        ranked = await sourcing_engine.rank_alternatives(sc)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    options_payload = [
+        {
+            "supplier": getattr(o, "supplier", f"{getattr(o, 'country', 'Unknown')} consortium"),
+            "country": getattr(o, "source_country", getattr(o, "country", "Unknown")),
+            "rank": getattr(o, "alternative_rank", getattr(o, "rank", 1)),
+            "leadTimeDays": getattr(o, "lead_time_days", 28),
+            "routeCorridor": CORRIDOR_FOR_COMMODITY.get(commodity, "hormuz"),
+            "currentRisk": float(getattr(o, "current_risk", 30.0)),
+            "rationale": getattr(o, "rationale", ""),
+        }
+        for o in ranked[:8]
+    ]
+
+    # Live risk snapshot per corridor for the requested commodity
+    risk_snapshot = {
+        "corridor_scores": [
+            {
+                "corridor": cor,
+                "score": _seeded_score(cor, commodity),
+                "tier": _tier(_seeded_score(cor, commodity)),
+            }
+            for cor in ["hormuz", "bab_el_mandeb", "malacca", "south_china_sea", "cape_of_good_hope", "suez"]
+        ],
+        "disrupted_corridor": disrupted,
+    }
+
+    substitutes = DEMAND_SUBSTITUTES.get(commodity)
+
+    from app.llm.summarise import LLMClient  # local import keeps cold-start fast
+    client = LLMClient(get_settings())
+    try:
+        narrative = await client.cascade_analysis(
+            commodity=commodity,
+            disrupted_corridor=disrupted,
+            options=options_payload,
+            risk_snapshot=risk_snapshot,
+            substitutes=substitutes,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Never 500 the demo - degrade gracefully to the fixture text.
+        fixtures = _load_fixture("llm_responses.json") or {}
+        narrative = fixtures.get("cascade_default", f"Cascade analysis unavailable: {exc}")
+
+    return {
+        "commodity": commodity,
+        "disruptedCorridor": disrupted,
+        "narrative": narrative,
+        "rankedOptions": options_payload,
+        "riskSnapshot": risk_snapshot,
+        "model": "gemini-2.5-flash" if get_settings().gemini_api_key and get_settings().allow_live_ingest else "fixture",
+        "generatedAt": _now_iso(),
+    }
+
+
+@router.get("/impact-cascade/causes")
+async def impact_cascade_causes() -> list[dict]:
+    """All cause nodes the user can pick as the origin of a cascade."""
+    from app.engines import cascade as cascade_engine
+
+    return cascade_engine.list_causes()
+
+
+@router.post("/impact-cascade")
+async def impact_cascade(body: dict | None = None) -> dict:
+    """Any cause anywhere -> everything it affects in India.
+
+    Body: {"causeId": "corridor:hormuz" | "country:china" | "commodity:lng",
+           "intensity": 0..1, "withNarrative": true}.
+    Returns the structured cascade (commodities, sectors, macro) plus an
+    AI narrative justifying the chain reaction.
+    """
+    from app.engines import cascade as cascade_engine
+
+    body = body or {}
+    cause_id = str(body.get("causeId", "")).strip()
+    intensity = float(body.get("intensity", 1.0))
+    want_narrative = bool(body.get("withNarrative", True))
+
+    if not cause_id:
+        raise HTTPException(status_code=400, detail="causeId is required")
+
+    try:
+        result = cascade_engine.resolve_cascade(cause_id, intensity=intensity)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    payload = result.to_dict()
+
+    narrative = ""
+    if want_narrative:
+        summary = cascade_engine.cascade_summary_for_llm(result)
+        from app.llm.summarise import LLMClient
+
+        client = LLMClient(get_settings())
+        try:
+            narrative = await client.impact_cascade(result.cause_label, summary)
+        except Exception:  # noqa: BLE001
+            fixtures = _load_fixture("llm_responses.json") or {}
+            narrative = fixtures.get("impact_cascade_default", "")
+
+    settings = get_settings()
+    return {
+        **payload,
+        "intensity": round(intensity, 2),
+        "narrative": narrative,
+        "model": "gemini-2.5-flash"
+        if (settings.gemini_api_key and settings.allow_live_ingest)
+        else "fixture",
+        "generatedAt": _now_iso(),
+    }
+
+
 @router.get("/sourcing/{commodity}/substitutes")
 async def sourcing_substitutes(commodity: str) -> dict:
     """Demand-side substitution options (alternate use cases) for a commodity.
@@ -1011,23 +1150,61 @@ async def post_spr_plan(body: dict | None = None) -> dict:
     return _build_spr_plan(horizon=horizon, target_cover_days=target, bias=bias)
 
 
-def gdelt_context_url(event: dict) -> str:
-    """Build a live, resolvable GDELT article-search URL for a feed event.
+_FABRICATED_HOSTS = (
+    "example.com",
+    "example.org",
+    "fixture.local",
+    "localhost",
+    "127.0.0.1",
+)
 
-    The fixture `urls` point at fabricated article pages that 404. Instead we
-    deep-link into the GDELT DOC 2.0 API article list (rendered as HTML),
-    querying on the event's actors and location so the user lands on real
-    matching coverage rather than a dead link.
+
+def _is_real_url(u: str) -> bool:
+    """Filter for URLs that point at a real public-web article, not a fixture stub."""
+    if not isinstance(u, str):
+        return False
+    u = u.strip()
+    if not u.startswith(("http://", "https://")):
+        return False
+    try:
+        host = u.split("/", 3)[2].lower()
+    except IndexError:
+        return False
+    if any(bad in host for bad in _FABRICATED_HOSTS):
+        return False
+    if "." not in host:
+        return False
+    return True
+
+
+def gdelt_context_url(event: dict) -> str:
+    """Return a URL that opens real news coverage for a feed event.
+
+    In live mode (ALLOW_LIVE_INGEST=true) we trust the event's `urls` array —
+    those are real source URLs that GDELT records.
+
+    In fixture mode the `urls` field is fabricated and will 404. We always
+    build a Google News search from the event's actors + location + theme,
+    so the user lands on real coverage no matter what.
     """
+    settings = get_settings()
+    if settings.allow_live_ingest:
+        raw_urls = event.get("urls") or []
+        if isinstance(raw_urls, list):
+            for u in raw_urls:
+                if _is_real_url(str(u)):
+                    return str(u).strip()
+
     terms = [
         str(event.get(key, "")).strip()
-        for key in ("actor1", "location", "actor2")
+        for key in ("actor1", "location", "actor2", "theme")
         if str(event.get(key, "")).strip()
     ]
-    query = " ".join(terms[:2]) or "energy supply chain India"
+    query = " ".join(terms[:3]) or "India energy supply chain"
+    # Google News (tbm=nws) reliably returns relevant article listings.
     return (
-        "https://api.gdeltproject.org/api/v2/doc/doc?query="
-        f"{quote_plus(query)}&mode=artlist&format=html&sort=datedesc&maxrecords=50"
+        "https://www.google.com/search?q="
+        f"{quote_plus(query)}&tbm=nws"
     )
 
 
@@ -1620,9 +1797,36 @@ async def chat(body: dict | None = None) -> dict:
     }
 
 
+async def _live_eia_overrides() -> dict[str, dict]:
+    """In live mode with an EIA key, fetch real Brent + Henry Hub series.
+
+    Returns a dict keyed by commodity code -> {last, prev, unit}. Empty if
+    live mode is off, no key, or the EIA call fails (graceful fixture fall-back).
+    """
+    settings = get_settings()
+    if not (settings.allow_live_ingest and settings.eia_api_key):
+        return {}
+    out: dict[str, dict] = {}
+    try:
+        from app.ingest import commodity_prices as cp
+        from app.models import Commodity as ModelCommodity
+
+        for code, enum_member in (("crude_oil", ModelCommodity.CRUDE_OIL), ("lng", ModelCommodity.LNG)):
+            series = await cp.fetch_prices(enum_member, days=5)
+            if isinstance(series, list) and len(series) >= 2:
+                last = series[-1].get("price", series[-1].get("value", 0))
+                prev = series[-2].get("price", series[-2].get("value", last))
+                unit = series[-1].get("unit", "")
+                out[code] = {"last": float(last), "prev": float(prev), "unit": unit}
+    except Exception:  # noqa: BLE001
+        return out
+    return out
+
+
 @router.get("/commodities")
 async def commodities() -> list[dict]:
     prices = _load_fixture("commodity_prices.json") or {}
+    eia = await _live_eia_overrides()
     out = []
     mapping = {
         "crude_oil": ("brent_crude_usd", "USD/bbl"),
@@ -1632,16 +1836,25 @@ async def commodities() -> list[dict]:
         "rare_earths": ("neodymium_oxide_cny", "CNY/t"),
     }
     for commodity, (fixture_key, unit) in mapping.items():
-        series = prices.get(fixture_key, [])
-        if isinstance(series, list) and len(series) >= 2:
-            last = series[-1].get("value", 0)
-            prev = series[-2].get("value", last)
+        source = "fixture"
+        if commodity in eia:
+            last = eia[commodity]["last"]
+            prev = eia[commodity]["prev"]
+            unit = eia[commodity]["unit"] or unit
             change = last - prev
             change_pct = (change / prev) * 100 if prev else 0
+            source = "eia-live"
         else:
-            last = 0
-            change = 0
-            change_pct = 0
+            series = prices.get(fixture_key, [])
+            if isinstance(series, list) and len(series) >= 2:
+                last = series[-1].get("value", 0)
+                prev = series[-2].get("value", last)
+                change = last - prev
+                change_pct = (change / prev) * 100 if prev else 0
+            else:
+                last = 0
+                change = 0
+                change_pct = 0
         out.append({
             "commodity": commodity,
             "symbol": fixture_key,
@@ -1649,6 +1862,7 @@ async def commodities() -> list[dict]:
             "change24h": round(float(change), 2),
             "changePct24h": round(float(change_pct), 2),
             "unit": unit,
+            "source": source,
             "asOf": _now_iso(),
         })
     return out

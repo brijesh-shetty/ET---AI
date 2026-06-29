@@ -295,6 +295,95 @@ export function postChat(question: string, history?: ChatMessage[]): Promise<Cha
   });
 }
 
+export interface CascadeCause {
+  id: string;
+  type: string;
+  label: string;
+  region: string;
+  description: string;
+}
+
+export interface CascadeImpactNode {
+  id: string;
+  label: string;
+  kind: string;
+  severity: number;
+  hop: number;
+  via: string[];
+  path: string[];
+  lagDays: number;
+}
+
+export interface CascadeEdge {
+  from: string;
+  to: string;
+  weight: number;
+  mechanism: string;
+  lagDays: number;
+}
+
+export interface ImpactCascadeResponse {
+  causeId: string;
+  causeLabel: string;
+  affectedCommodities: CascadeImpactNode[];
+  sectorImpacts: CascadeImpactNode[];
+  macroImpacts: CascadeImpactNode[];
+  edgesUsed: CascadeEdge[];
+  nodeCount: number;
+  intensity: number;
+  narrative: string;
+  model: string;
+  generatedAt: string;
+}
+
+export function getCascadeCauses(): Promise<CascadeCause[]> {
+  return request<CascadeCause[]>({ method: 'GET', url: '/impact-cascade/causes' });
+}
+
+export function postImpactCascade(
+  causeId: string,
+  intensity = 1.0,
+  withNarrative = true,
+): Promise<ImpactCascadeResponse> {
+  return request<ImpactCascadeResponse>({
+    method: 'POST',
+    url: '/impact-cascade',
+    data: { causeId, intensity, withNarrative },
+  });
+}
+
+export interface CascadeAnalysisResponse {
+  commodity: Commodity;
+  disruptedCorridor: string | null;
+  narrative: string;
+  rankedOptions: Array<{
+    supplier: string;
+    country: string;
+    rank: number;
+    leadTimeDays: number;
+    routeCorridor: string;
+    currentRisk: number;
+    rationale: string;
+  }>;
+  riskSnapshot: {
+    corridor_scores: Array<{ corridor: string; score: number; tier: string }>;
+    disrupted_corridor: string | null;
+  };
+  model: string;
+  generatedAt: string;
+}
+
+export function postCascadeAnalysis(
+  commodity: Commodity,
+  disruptedCorridor: string | null,
+): Promise<CascadeAnalysisResponse> {
+  return request<CascadeAnalysisResponse>({
+    method: 'POST',
+    url: `/sourcing/${encodeURIComponent(commodity)}/analyse`,
+    data: { disruptedCorridor },
+  });
+}
+
 export interface SanctionAlertItem {
   vesselName: string;
   mmsi?: string;

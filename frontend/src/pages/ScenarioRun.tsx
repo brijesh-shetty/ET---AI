@@ -23,7 +23,7 @@ import {
   type ScenarioResult,
   type SourcingOption,
 } from '@/lib/types';
-import { fmtNumber, fmtTime } from '@/lib/fmt';
+import { commodityUnitShort, fmtNumber, fmtTime } from '@/lib/fmt';
 import CommodityBadge from '@/components/CommodityBadge';
 import ImpactBar from '@/components/ImpactBar';
 import NarrativeFeed from '@/components/NarrativeFeed';
@@ -228,7 +228,7 @@ export default function ScenarioRun() {
                   <tr>
                     <th className="px-4 py-2 text-left">Rank</th>
                     <th className="px-4 py-2 text-left">Supplier / country</th>
-                    <th className="px-4 py-2 text-right">Volume MB</th>
+                    <th className="px-4 py-2 text-right">Volume {meta ? commodityUnitShort(meta.primary_commodity) : ''}</th>
                     <th className="px-4 py-2 text-right">Lead time</th>
                     <th className="px-4 py-2 text-right">Risk</th>
                     <th className="px-4 py-2 text-left">Sanctions</th>

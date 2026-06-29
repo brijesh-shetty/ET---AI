@@ -10,6 +10,7 @@ import Scenarios from "@/pages/Scenarios";
 import ScenarioCompare from "@/pages/ScenarioCompare";
 import StressTest from "@/pages/StressTest";
 import Backtest from "@/pages/Backtest";
+import ImpactCascade from "@/pages/ImpactCascade";
 import ChatDrawer from "@/components/ChatDrawer";
 import CommodityTicker from "@/components/CommodityTicker";
 import { useAppStore } from "@/lib/store";
@@ -28,6 +29,7 @@ const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: "/", label: "Dashboard", end: true },
       { to: "/twin", label: "Digital twin" },
+      { to: "/cascade", label: "Impact cascade" },
       { to: "/scenarios", label: "Scenarios" },
       { to: "/compare", label: "Compare" },
     ],
@@ -179,6 +181,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/twin" element={<DigitalTwin />} />
+            <Route path="/cascade" element={<ImpactCascade />} />
             <Route path="/scenarios" element={<Scenarios />} />
             <Route path="/scenarios/:name" element={<ScenarioRun />} />
             <Route path="/compare" element={<ScenarioCompare />} />

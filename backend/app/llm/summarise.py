@@ -30,8 +30,10 @@ from typing import TYPE_CHECKING, Any
 
 from app.llm.prompts import (
     SYSTEM_ANALYST,
+    build_cascade_prompt,
     build_chat_prompt,
     build_executive_brief_prompt,
+    build_impact_cascade_prompt,
     build_recommendation_prompt,
     build_risk_summary_prompt,
     build_scenario_narrative_prompt,
@@ -251,6 +253,35 @@ class LLMClient:
             user_prompt=prompt,
             fixture_key="chat_default",
             max_tokens=_DEFAULT_MAX_TOKENS,
+        )
+
+    async def cascade_analysis(
+        self,
+        commodity: Any,
+        disrupted_corridor: str | None,
+        options: list[Any],
+        risk_snapshot: dict[str, Any],
+        substitutes: dict[str, Any] | None = None,
+    ) -> str:
+        """Cascade-reasoning sourcing analysis used by the Sourcing page."""
+        prompt = build_cascade_prompt(
+            commodity, disrupted_corridor, options, risk_snapshot, substitutes
+        )
+        return await self._complete(
+            model=self._synthesis_model,
+            user_prompt=prompt,
+            fixture_key="cascade_default",
+            max_tokens=_BRIEF_MAX_TOKENS,
+        )
+
+    async def impact_cascade(self, cause_label: str, cascade: dict[str, Any]) -> str:
+        """Narrative for the impact-cascade engine (any cause -> India effects)."""
+        prompt = build_impact_cascade_prompt(cause_label, cascade)
+        return await self._complete(
+            model=self._synthesis_model,
+            user_prompt=prompt,
+            fixture_key="impact_cascade_default",
+            max_tokens=_BRIEF_MAX_TOKENS,
         )
 
 

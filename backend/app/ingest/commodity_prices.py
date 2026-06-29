@@ -25,17 +25,19 @@ from tenacity import (
     wait_exponential,
 )
 
-from app.config import settings
+from app.config import get_settings
 from app.models import Commodity
+
+settings = get_settings()
 
 log = structlog.get_logger(__name__)
 
 _EIA_BASE = "https://api.eia.gov/v2"
-_FIXTURE_PATH = Path(__file__).resolve().parents[3] / "data" / "fixtures" / "commodity_prices.json"
+_FIXTURE_PATH = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "commodity_prices.json"
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
 
 _EIA_SERIES = {
-    Commodity.CRUDE: ("petroleum/pri/spt/data/", "RBRTE", "USD/bbl"),
+    Commodity.CRUDE_OIL: ("petroleum/pri/spt/data/", "RBRTE", "USD/bbl"),
     Commodity.LNG: ("natural-gas/pri/fut/data/", "RNGWHHD", "USD/MMBtu"),
 }
 

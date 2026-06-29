@@ -292,10 +292,15 @@ def build_chat_prompt(question: str, context: dict[str, Any]) -> str:
         "QUESTION:\n"
         f"{question}\n\n"
         "Answer rules:\n"
-        "- Cite specific figures from current_scores. When you reference "
-        "a corridor, include its composite score and tier. When you "
-        "reference a commodity, name it as it appears in "
-        "commodities_basket.\n"
+        "- For greetings, pleasantries, or questions under 6 words that "
+        "are not specific data asks (e.g. 'hello', 'hi', 'what can you "
+        "do', 'help'): reply in ONE short friendly sentence inviting the "
+        "user to ask about a specific corridor, commodity, scenario, or "
+        "sourcing decision. Do NOT produce a situation report.\n"
+        "- For genuine questions: cite specific figures from "
+        "current_scores. When you reference a corridor, include its "
+        "composite score and tier. When you reference a commodity, name "
+        "it as it appears in commodities_basket.\n"
         "- When you cite an event, include its id or headline from "
         "recent_events. When you cite a scenario, include its "
         "scenarioId from top_scenarios.\n"
@@ -310,10 +315,114 @@ def build_chat_prompt(question: str, context: dict[str, Any]) -> str:
     )
 
 
+def build_cascade_prompt(
+    commodity: Any,
+    disrupted_corridor: str | None,
+    options: list[Any],
+    risk_snapshot: dict[str, Any],
+    substitutes: dict[str, Any] | None,
+) -> str:
+    """Reasoning prompt for the cascade analysis of a sourcing disruption.
+
+    Asks the model to trace the chain reaction through downstream sectors
+    (refinery, logistics, pricing, secondary sectors, FX impact, GDP),
+    then justify the top 3 alternative suppliers in light of those
+    cascade effects — NOT a formula-driven ranking.
+    """
+    return (
+        f"{SYSTEM_ANALYST}\n\n"
+        "A cutoff has occurred (or is being simulated) for the commodity and "
+        "corridor below. Walk the user through the resulting CHAIN REACTION "
+        "and recommend the top 3 alternative suppliers, justified by how "
+        "they mitigate the cascade — not by a fixed ranking formula.\n\n"
+        "COMMODITY:\n"
+        f"{_compact_json(commodity)}\n\n"
+        "DISRUPTED CORRIDOR (if any):\n"
+        f"{_compact_json(disrupted_corridor)}\n\n"
+        "CURRENT SOURCING OPTIONS (ranked by the dashboard's formula):\n"
+        f"{_compact_json(options)}\n\n"
+        "LIVE RISK SNAPSHOT (per-corridor composite scores, drivers):\n"
+        f"{_compact_json(risk_snapshot)}\n\n"
+        "DEMAND-SIDE SUBSTITUTES (alternate end-uses or chemistries):\n"
+        f"{_compact_json(substitutes)}\n\n"
+        "Deliver the response in five labelled sections, plain text, no "
+        "markdown headers, no bullet markers:\n\n"
+        "Section 1 - Immediate impact (first 7 days). Describe what fails "
+        "first when this corridor closes: which Indian refineries / steel "
+        "mills / EV cell makers / solar fabs lose feedstock, which terminals "
+        "back up, which sectoral prices spike first.\n\n"
+        "Section 2 - Secondary cascade (days 7-30). Trace the effects on "
+        "downstream sectors: power-sector fuel mix, fertilizer / petchem "
+        "input cost, steel margin compression, EV cell cost passthrough, "
+        "solar IRR. Reference specific Indian assets when relevant.\n\n"
+        "Section 3 - Macro effects (30+ days). Brent uplift, JKM uplift, "
+        "INR/USD impact, GDP basis-point drag, inflation pass-through, fiscal "
+        "burden if SPR is drawn.\n\n"
+        "Section 4 - Top 3 recommended alternatives. For each, name the "
+        "supplier_country and Indian port pair, the volume to lift, the lead "
+        "time, and a one-paragraph justification grounded in the cascade "
+        "above. Explain WHY this option mitigates the most damaging cascade "
+        "step, not just why its composite score is high.\n\n"
+        "Section 5 - Guardrails and what's NOT solved. Sanctions exposure on "
+        "any alternative. Sectoral cascade steps the alternatives do NOT "
+        "fully address. Demand-side levers (efficiency, substitution, "
+        "rationing) that should run in parallel.\n\n"
+        "Be specific about Indian assets (Vadinar, Jamnagar, Mangalore, "
+        "Paradip, Dhamra, Dahej, Hazira, Kochi, Ennore, Dabhol, Mundra) "
+        "when they materially affect the cascade."
+    )
+
+
+def build_impact_cascade_prompt(
+    cause_label: str,
+    cascade: dict[str, Any],
+) -> str:
+    """Narrative prompt for the 'any cause -> everything affected in India' engine.
+
+    The cascade dict is the structured output of the dependency-graph BFS:
+    affectedCommodities, sectorImpacts (with transmission paths), macroImpacts.
+    The model must JUSTIFY the chain reaction, not restate the numbers.
+    """
+    return (
+        f"{SYSTEM_ANALYST}\n\n"
+        "A disruption has occurred. The dependency-graph engine has already "
+        "computed WHICH India-side nodes are affected and by how much. Your "
+        "job is to explain the CHAIN REACTION in clear, causal prose so a "
+        "policymaker understands not just what is hit, but why, in what order, "
+        "and which effect is the non-obvious one to watch.\n\n"
+        f"CAUSE: {cause_label}\n\n"
+        "COMPUTED CASCADE (severity 0-1, lagDays = time for the effect to land):\n"
+        f"{_compact_json(cascade)}\n\n"
+        "Write five short labelled sections, plain text, no markdown headers, "
+        "no bullet markers:\n\n"
+        "Section 1 - What this hits first. The directly affected commodities "
+        "and why this cause reaches them. Name the import-dependence where it "
+        "matters.\n\n"
+        "Section 2 - The chain into Indian sectors. Walk the transmission paths "
+        "in the cascade. Follow the highest-severity sector chains and explain "
+        "the mechanism at each hop (e.g. LNG starves urea plants, urea shortage "
+        "hits the kharif crop, crop shortfall feeds food inflation).\n\n"
+        "Section 3 - The hidden effect. Identify the ONE non-obvious downstream "
+        "consequence a procurement-only view would miss (often a second-order "
+        "sector or a fertilizer/food/FX loop), and explain why it matters.\n\n"
+        "Section 4 - Macro and timing. Summarise the CPI/WPI/INR/GDP/fiscal "
+        "effects with the approximate lag from the cascade. State which effects "
+        "land in week one versus month two-plus.\n\n"
+        "Section 5 - What to do now. Concrete mitigations matched to the most "
+        "damaging chains: sourcing moves, strategic-reserve / stockpile draws, "
+        "demand-side levers, and any policy trigger (duty relaxation, subsidy "
+        "buffer). Be specific about Indian assets where relevant.\n\n"
+        "Ground every claim in the computed cascade. Do not invent affected "
+        "sectors that are not in the cascade data."
+    )
+
+
 __all__ = [
     "SYSTEM_ANALYST",
+    "build_cascade_prompt",
     "build_chat_prompt",
     "build_executive_brief_prompt",
+    "build_impact_cascade_prompt",
     "build_recommendation_prompt",
     "build_risk_summary_prompt",
     "build_scenario_narrative_prompt",

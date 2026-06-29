@@ -18,11 +18,13 @@ from pathlib import Path
 import httpx
 import structlog
 
-from app.config import settings
+from app.config import get_settings
+
+settings = get_settings()
 
 log = structlog.get_logger(__name__)
 
-_FIXTURE_PATH = Path(__file__).resolve().parents[3] / "data" / "fixtures" / "coal.json"
+_FIXTURE_PATH = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "coal.json"
 _DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
 _STEEL_MIN_URL = "https://steel.gov.in/api/coking_coal_imports.json"
 

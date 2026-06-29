@@ -18,12 +18,14 @@ from pathlib import Path
 
 import structlog
 
-from app.config import settings
+from app.config import get_settings
+
+settings = get_settings()
 from app.models import Commodity
 
 log = structlog.get_logger(__name__)
 
-_FIXTURE_PATH = Path(__file__).resolve().parents[3] / "data" / "fixtures" / "minerals.json"
+_FIXTURE_PATH = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "minerals.json"
 
 _CHINA_REFINING_SHARE = {
     Commodity.LITHIUM: 0.65,

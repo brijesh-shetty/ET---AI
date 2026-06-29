@@ -16,11 +16,13 @@ from pathlib import Path
 
 import structlog
 
-from app.config import settings
+from app.config import get_settings
+
+settings = get_settings()
 
 log = structlog.get_logger(__name__)
 
-_FIXTURE_PATH = Path(__file__).resolve().parents[3] / "data" / "fixtures" / "solar.json"
+_FIXTURE_PATH = Path(__file__).resolve().parents[2] / "data" / "fixtures" / "solar.json"
 
 
 async def module_import_shares() -> dict[str, float]:
