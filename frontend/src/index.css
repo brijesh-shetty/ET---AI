@@ -1,0 +1,59 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-canvas text-slate-100 font-sans antialiased;
+    font-feature-settings: "cv11", "ss01";
+  }
+
+  ::selection {
+    background-color: rgba(99, 102, 241, 0.35);
+    color: inherit;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply bg-panel border border-border-soft rounded-lg;
+  }
+
+  .panel-2 {
+    @apply bg-panel-2 border border-border-soft rounded-lg;
+  }
+
+  .stat-label {
+    @apply text-[11px] uppercase tracking-[0.14em] text-slate-500;
+  }
+
+  .stat-value {
+    @apply text-2xl font-semibold text-slate-100 tabular-nums;
+  }
+}
+
+.leaflet-container {
+  background: #0b1220;
+  z-index: 0;
+}
+
+.leaflet-pane,
+.leaflet-top,
+.leaflet-bottom {
+  z-index: 1 !important;
+}
+
+.leaflet-control-attribution {
+  background: rgba(15, 23, 42, 0.7) !important;
+  color: #94a3b8 !important;
+}
+
+.leaflet-control-attribution a {
+  color: #818cf8 !important;
+}

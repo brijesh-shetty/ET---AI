@@ -1,0 +1,107 @@
+[
+  {
+    "name": "NATIONAL IRANIAN TANKER COMPANY",
+    "type": "company",
+    "program": "IRAN",
+    "aliases": ["NITC", "N.I.T.C.", "NITC PJSC"],
+    "added_date": "2012-07-12"
+  },
+  {
+    "name": "DELVAR",
+    "type": "vessel",
+    "program": "IRAN",
+    "aliases": ["IMO 9569589", "ex-DESTINI"],
+    "added_date": "2020-09-03"
+  },
+  {
+    "name": "SOVCOMFLOT PJSC",
+    "type": "company",
+    "program": "RUSSIA-EO14024",
+    "aliases": ["SCF Group", "PAO SOVCOMFLOT"],
+    "added_date": "2022-02-24"
+  },
+  {
+    "name": "PRIMORYE 1",
+    "type": "vessel",
+    "program": "RUSSIA-EO14024",
+    "aliases": ["IMO 9610382"],
+    "added_date": "2024-02-23"
+  },
+  {
+    "name": "PERSIAN GULF PETROCHEMICAL INDUSTRIES COMPANY",
+    "type": "company",
+    "program": "IRAN",
+    "aliases": ["PGPIC", "Persian Gulf Holding"],
+    "added_date": "2019-06-07"
+  },
+  {
+    "name": "HAPPINESS I",
+    "type": "vessel",
+    "program": "IRAN",
+    "aliases": ["IMO 9165618", "ex-HAPPINESS"],
+    "added_date": "2022-11-04"
+  },
+  {
+    "name": "ROSNEFTEFLOT LLC",
+    "type": "company",
+    "program": "RUSSIA-EO14024",
+    "aliases": ["Rosneft Marine", "RN-Marine"],
+    "added_date": "2023-02-24"
+  },
+  {
+    "name": "GAZPROMBANK",
+    "type": "company",
+    "program": "RUSSIA-EO13662",
+    "aliases": ["JSC Gazprombank", "GPB"],
+    "added_date": "2014-07-16"
+  },
+  {
+    "name": "KOKHA",
+    "type": "vessel",
+    "program": "IRAN",
+    "aliases": ["IMO 9203214", "ex-NEPTUNE"],
+    "added_date": "2023-04-27"
+  },
+  {
+    "name": "VENEZUELA OIL COMPANY PDVSA",
+    "type": "company",
+    "program": "VENEZUELA-EO13884",
+    "aliases": ["Petroleos de Venezuela", "PDVSA"],
+    "added_date": "2019-01-28"
+  },
+  {
+    "name": "SAVIZ",
+    "type": "vessel",
+    "program": "IRAN",
+    "aliases": ["IMO 9167551"],
+    "added_date": "2021-04-15"
+  },
+  {
+    "name": "MOHAMMAD HOSSEIN SHARIATMADARI",
+    "type": "individual",
+    "program": "IRAN-HR",
+    "aliases": ["M.H. Shariatmadari"],
+    "added_date": "2020-12-08"
+  },
+  {
+    "name": "ARCTIC LNG 2 LLC",
+    "type": "company",
+    "program": "RUSSIA-EO14024",
+    "aliases": ["Arctic LNG-2", "Novatek Arctic LNG 2"],
+    "added_date": "2023-11-02"
+  },
+  {
+    "name": "WAGNER GROUP LOGISTICS",
+    "type": "company",
+    "program": "RUSSIA-EO14024",
+    "aliases": ["PMC Wagner Logistics", "Wagner Cargo"],
+    "added_date": "2023-01-26"
+  },
+  {
+    "name": "BANK MELLI IRAN",
+    "type": "company",
+    "program": "IRAN",
+    "aliases": ["BMI", "Bank Melli"],
+    "added_date": "2007-10-25"
+  }
+]

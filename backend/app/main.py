@@ -1,0 +1,92 @@
+"""FastAPI entrypoint for the PS2 Energy Resilience platform.
+
+Exposes the public HTTP surface used by the React dashboard and any external
+clients. Live ingestion workers (AIS, GDELT, PPAC) attach as background tasks
+when ``allow_live_ingest`` is enabled in configuration.
+"""
+
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
+
+import structlog
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.api.routes import router as api_router
+from app.config import get_settings
+
+
+def _configure_logging() -> None:
+    logging.basicConfig(
+        format="%(message)s",
+        level=logging.INFO,
+    )
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
+
+
+_configure_logging()
+log = structlog.get_logger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    log.info(
+        "startup.config",
+        environment=settings.environment,
+        allow_live_ingest=settings.allow_live_ingest,
+        fixtures_path=str(settings.fixtures_path),
+        anthropic_synthesis_model=settings.anthropic_synthesis_model,
+        anthropic_classifier_model=settings.anthropic_classifier_model,
+        ais_stream_enabled=bool(settings.ais_stream_api_key),
+        gdelt_enabled=settings.gdelt_enabled,
+    )
+    yield
+    log.info("shutdown.complete")
+
+
+app = FastAPI(
+    title="PS2 Energy Resilience API",
+    description=(
+        "AI-driven situational awareness, scenario simulation, sourcing diversification "
+        "and SPR optimisation for India's strategic energy and critical-mineral imports."
+    ),
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(api_router, prefix="/api")
+
+
+@app.get("/healthz", tags=["meta"])
+async def healthz() -> dict[str, str]:
+    """Liveness probe used by orchestrators and the frontend boot sequence."""
+    return {"status": "ok", "service": "ps2-energy-resilience"}

@@ -1,0 +1,142 @@
+{
+  "lithium": {
+    "world_reserves_share_pct": {
+      "Chile": 36.2,
+      "Australia": 24.8,
+      "Argentina": 10.4,
+      "China": 7.9,
+      "United States": 4.1,
+      "Canada": 2.6,
+      "Zimbabwe": 1.8,
+      "Brazil": 1.4,
+      "Others": 10.8
+    },
+    "refining_concentration_pct": {
+      "China": 64.8,
+      "Chile": 16.2,
+      "Argentina": 9.4,
+      "Australia": 4.1,
+      "Others": 5.5
+    },
+    "china_share_pct": 64.8,
+    "india_strategic_stockpile_tonnes": 0,
+    "note": "India lithium block auctions in J&K and Chhattisgarh under exploration; KABIL securing offtake in Argentina."
+  },
+  "cobalt": {
+    "world_reserves_share_pct": {
+      "DRC": 53.4,
+      "Australia": 16.2,
+      "Indonesia": 7.8,
+      "Cuba": 6.4,
+      "Philippines": 3.8,
+      "Russia": 3.1,
+      "Canada": 2.4,
+      "Madagascar": 1.6,
+      "Others": 5.3
+    },
+    "refining_concentration_pct": {
+      "China": 72.4,
+      "Finland": 8.6,
+      "Belgium": 5.2,
+      "Japan": 4.1,
+      "Canada": 3.2,
+      "Norway": 2.4,
+      "Others": 4.1
+    },
+    "china_share_pct": 72.4,
+    "india_strategic_stockpile_tonnes": 0,
+    "note": "DRC mines supply ~70% of mined cobalt; ~90% of that ore is refined in China."
+  },
+  "nickel": {
+    "world_reserves_share_pct": {
+      "Indonesia": 22.1,
+      "Australia": 21.4,
+      "Brazil": 16.8,
+      "Russia": 7.6,
+      "Cuba": 6.2,
+      "Philippines": 4.8,
+      "China": 3.4,
+      "Canada": 2.8,
+      "Others": 14.9
+    },
+    "refining_concentration_pct": {
+      "China": 39.2,
+      "Indonesia": 31.4,
+      "Japan": 7.2,
+      "Russia": 6.8,
+      "Australia": 4.1,
+      "Canada": 3.6,
+      "Others": 7.7
+    },
+    "china_share_pct": 39.2,
+    "india_strategic_stockpile_tonnes": 0,
+    "note": "Indonesia ore export ban (2020) consolidated Class-I nickel refining in China-Indonesia joint ventures."
+  },
+  "rare_earth": {
+    "world_reserves_share_pct": {
+      "China": 38.6,
+      "Vietnam": 18.4,
+      "Brazil": 17.2,
+      "Russia": 9.8,
+      "India": 5.4,
+      "Australia": 3.2,
+      "Greenland": 1.6,
+      "United States": 1.2,
+      "Others": 4.6
+    },
+    "refining_concentration_pct": {
+      "China": 86.4,
+      "Malaysia": 5.8,
+      "Estonia": 2.4,
+      "Japan": 2.1,
+      "France": 1.6,
+      "Others": 1.7
+    },
+    "china_share_pct": 86.4,
+    "india_strategic_stockpile_tonnes": 1200,
+    "note": "IREL India holds reserves in monazite beach sands; refining capacity for separated oxides is still nascent."
+  },
+  "graphite": {
+    "world_reserves_share_pct": {
+      "Turkey": 27.4,
+      "China": 16.8,
+      "Brazil": 14.2,
+      "Mozambique": 8.6,
+      "Madagascar": 7.1,
+      "Tanzania": 6.4,
+      "India": 4.8,
+      "Others": 14.7
+    },
+    "refining_concentration_pct": {
+      "China": 78.2,
+      "Japan": 7.4,
+      "South Korea": 5.1,
+      "Mozambique": 3.2,
+      "Others": 6.1
+    },
+    "china_share_pct": 78.2,
+    "india_strategic_stockpile_tonnes": 0,
+    "note": "Battery-grade spherical graphite is ~95% China-processed even when raw flake originates elsewhere."
+  },
+  "manganese": {
+    "world_reserves_share_pct": {
+      "South Africa": 38.4,
+      "Brazil": 16.2,
+      "Australia": 12.4,
+      "Ukraine": 8.8,
+      "Gabon": 5.6,
+      "China": 4.4,
+      "India": 3.8,
+      "Others": 10.4
+    },
+    "refining_concentration_pct": {
+      "China": 91.2,
+      "Belgium": 3.4,
+      "Japan": 2.1,
+      "Others": 3.3
+    },
+    "china_share_pct": 91.2,
+    "india_strategic_stockpile_tonnes": 0,
+    "note": "High-purity manganese sulphate for EV cathodes is a near-monopoly out of China."
+  }
+}

@@ -1,0 +1,90 @@
+[
+  {
+    "name": "Jamnagar",
+    "operator": "Reliance Industries Limited",
+    "capacity_mmtpa": 68.2,
+    "lat": 22.4707,
+    "lon": 70.0577,
+    "primary_crude_grades": ["sweet light", "sour medium", "heavy sour", "sour heavy"]
+  },
+  {
+    "name": "Vadinar",
+    "operator": "Nayara Energy",
+    "capacity_mmtpa": 20.0,
+    "lat": 22.4344,
+    "lon": 69.7220,
+    "primary_crude_grades": ["sour medium", "heavy sour", "sour heavy"]
+  },
+  {
+    "name": "Paradip",
+    "operator": "Indian Oil Corporation",
+    "capacity_mmtpa": 15.0,
+    "lat": 20.3168,
+    "lon": 86.6107,
+    "primary_crude_grades": ["sour medium", "heavy sour"]
+  },
+  {
+    "name": "Mumbai",
+    "operator": "Bharat Petroleum Corporation Limited",
+    "capacity_mmtpa": 12.0,
+    "lat": 18.9938,
+    "lon": 72.8419,
+    "primary_crude_grades": ["sweet light", "sour medium"]
+  },
+  {
+    "name": "Kochi",
+    "operator": "Bharat Petroleum Corporation Limited",
+    "capacity_mmtpa": 15.5,
+    "lat": 9.9658,
+    "lon": 76.2421,
+    "primary_crude_grades": ["sour medium", "heavy sour"]
+  },
+  {
+    "name": "Mathura",
+    "operator": "Indian Oil Corporation",
+    "capacity_mmtpa": 8.0,
+    "lat": 27.5045,
+    "lon": 77.6611,
+    "primary_crude_grades": ["sweet light", "sour medium"]
+  },
+  {
+    "name": "Panipat",
+    "operator": "Indian Oil Corporation",
+    "capacity_mmtpa": 15.0,
+    "lat": 29.3909,
+    "lon": 76.9635,
+    "primary_crude_grades": ["sour medium", "heavy sour"]
+  },
+  {
+    "name": "Visakhapatnam",
+    "operator": "Hindustan Petroleum Corporation Limited",
+    "capacity_mmtpa": 8.3,
+    "lat": 17.6868,
+    "lon": 83.2185,
+    "primary_crude_grades": ["sour medium", "heavy sour"]
+  },
+  {
+    "name": "Mangalore",
+    "operator": "Mangalore Refinery and Petrochemicals Limited",
+    "capacity_mmtpa": 15.0,
+    "lat": 12.9141,
+    "lon": 74.8560,
+    "primary_crude_grades": ["sour medium", "heavy sour", "sour heavy"]
+  },
+  {
+    "name": "Bina",
+    "operator": "Bharat Oman Refineries Limited",
+    "capacity_mmtpa": 7.8,
+    "lat": 24.1714,
+    "lon": 78.1791,
+    "primary_crude_grades": ["sour medium", "heavy sour"]
+  },
+  {
+    "name": "Numaligarh",
+    "operator": "Numaligarh Refinery Limited",
+    "capacity_mmtpa": 3.0,
+    "lat": 26.6376,
+    "lon": 93.6862,
+    "primary_crude_grades": ["sweet light", "sour medium"]
+  }
+]

@@ -1,0 +1,87 @@
+{
+  "crude_oil": {
+    "Russia": 36.2,
+    "Iraq": 18.4,
+    "Saudi Arabia": 13.8,
+    "UAE": 9.1,
+    "United States": 6.5,
+    "Nigeria": 3.8,
+    "Kuwait": 3.2,
+    "Angola": 2.4,
+    "Brazil": 2.1,
+    "Mexico": 1.6,
+    "Others": 2.9
+  },
+  "lng": {
+    "Qatar": 41.5,
+    "United States": 22.8,
+    "UAE": 13.2,
+    "Australia": 6.1,
+    "Russia": 4.4,
+    "Oman": 3.8,
+    "Nigeria": 3.1,
+    "Angola": 1.8,
+    "Equatorial Guinea": 1.5,
+    "Others": 1.8
+  },
+  "coking_coal": {
+    "Australia": 67.4,
+    "United States": 10.8,
+    "Russia": 7.2,
+    "Mozambique": 6.1,
+    "Canada": 3.8,
+    "Indonesia": 2.4,
+    "Others": 2.3
+  },
+  "lithium": {
+    "Chile": 38.5,
+    "China": 28.4,
+    "Argentina": 14.6,
+    "Australia": 12.1,
+    "Brazil": 3.8,
+    "Others": 2.6
+  },
+  "cobalt": {
+    "China": 61.2,
+    "Belgium": 14.8,
+    "Finland": 8.4,
+    "Norway": 5.6,
+    "Japan": 3.8,
+    "South Korea": 3.4,
+    "Others": 2.8
+  },
+  "nickel": {
+    "Indonesia": 44.6,
+    "Philippines": 18.2,
+    "Russia": 11.4,
+    "Australia": 9.8,
+    "Japan": 6.2,
+    "South Korea": 4.4,
+    "Others": 5.4
+  },
+  "rare_earth": {
+    "China": 89.4,
+    "Malaysia": 4.2,
+    "Vietnam": 2.8,
+    "Japan": 1.6,
+    "United States": 1.2,
+    "Others": 0.8
+  },
+  "solar_pv": {
+    "China": 78.6,
+    "Vietnam": 8.4,
+    "Malaysia": 5.2,
+    "Thailand": 3.8,
+    "South Korea": 1.4,
+    "Taiwan": 1.2,
+    "Others": 1.4
+  },
+  "uranium": {
+    "Kazakhstan": 47.8,
+    "Russia": 22.4,
+    "France": 14.6,
+    "Canada": 8.2,
+    "Uzbekistan": 4.8,
+    "Others": 2.2
+  }
+}

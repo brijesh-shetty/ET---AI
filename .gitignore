@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Node
+node_modules/
+dist/
+build/
+.next/
+.turbo/
+.parcel-cache/
+*.tsbuildinfo
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+*.secret
+
+# Data caches (raw ingested data lives outside repo)
+.cache/
+data/raw/
+data/processed/
+*.parquet
+*.sqlite
+*.db
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Hackathon outputs
+demo_outputs/
+recorded_demo/
+*.mp4
+*.mov
+!docs/**/*.mp4

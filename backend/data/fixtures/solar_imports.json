@@ -1,0 +1,80 @@
+{
+  "modules": {
+    "import_share_pct": {
+      "China": 76.4,
+      "Vietnam": 9.2,
+      "Malaysia": 6.1,
+      "Thailand": 4.4,
+      "South Korea": 1.6,
+      "Taiwan": 1.2,
+      "Others": 1.1
+    },
+    "fy25_import_volume_gw": 18.4,
+    "fy25_import_value_usd_bn": 4.62
+  },
+  "cells": {
+    "import_share_pct": {
+      "China": 62.8,
+      "Vietnam": 14.6,
+      "Malaysia": 9.4,
+      "Thailand": 6.8,
+      "South Korea": 2.4,
+      "Taiwan": 2.1,
+      "Others": 1.9
+    },
+    "fy25_import_volume_gw": 14.2,
+    "fy25_import_value_usd_bn": 2.18
+  },
+  "wafers": {
+    "import_share_pct": {
+      "China": 92.4,
+      "Vietnam": 3.2,
+      "Malaysia": 1.8,
+      "Taiwan": 1.4,
+      "Others": 1.2
+    },
+    "fy25_import_volume_gw": 8.6,
+    "fy25_import_value_usd_bn": 0.94
+  },
+  "polysilicon": {
+    "import_share_pct": {
+      "China": 88.2,
+      "Germany": 4.4,
+      "Malaysia": 3.1,
+      "United States": 2.4,
+      "South Korea": 1.2,
+      "Others": 0.7
+    },
+    "fy25_import_volume_kt": 22.4,
+    "fy25_import_value_usd_bn": 0.41
+  },
+  "pli_scheme": {
+    "tranche_1": {
+      "sanctioned_gw": 8.7,
+      "commissioned_gw": 8.7,
+      "status": "FULLY_OPERATIONAL"
+    },
+    "tranche_2": {
+      "sanctioned_gw": 39.6,
+      "commissioned_gw": 21.4,
+      "status": "PARTIAL"
+    },
+    "tranche_3": {
+      "sanctioned_gw": 12.0,
+      "commissioned_gw": 0.0,
+      "status": "AWARDED_PENDING_COMMISSIONING"
+    },
+    "total_sanctioned_gw": 60.3,
+    "total_commissioned_gw": 30.1,
+    "commissioning_ratio_pct": 49.9,
+    "fy27_target_gw": 50.0
+  },
+  "domestic_capacity_gw": {
+    "modules": 64.5,
+    "cells": 25.8,
+    "wafers": 2.4,
+    "polysilicon": 0.0
+  },
+  "alcm_compliance_pct_of_tenders": 78.4,
+  "note": "Approved List of Models and Manufacturers (ALMM) and Basic Customs Duty (40% modules, 25% cells) drive domestic share, but wafer and polysilicon dependence on China remains near-total."
+}

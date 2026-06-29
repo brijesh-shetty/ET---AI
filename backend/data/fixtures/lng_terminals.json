@@ -1,0 +1,56 @@
+[
+  {
+    "name": "Dahej",
+    "operator": "Petronet LNG Limited",
+    "capacity_mtpa": 17.5,
+    "utilization_pct": 96.4,
+    "lat": 21.7039,
+    "lon": 72.5275,
+    "status": "OPERATIONAL"
+  },
+  {
+    "name": "Hazira",
+    "operator": "Shell Energy India",
+    "capacity_mtpa": 5.0,
+    "utilization_pct": 71.8,
+    "lat": 21.1166,
+    "lon": 72.6313,
+    "status": "OPERATIONAL"
+  },
+  {
+    "name": "Kochi",
+    "operator": "Petronet LNG Limited",
+    "capacity_mtpa": 5.0,
+    "utilization_pct": 28.4,
+    "lat": 9.9728,
+    "lon": 76.2519,
+    "status": "OPERATIONAL"
+  },
+  {
+    "name": "Dabhol",
+    "operator": "Konkan LNG Limited",
+    "capacity_mtpa": 5.0,
+    "utilization_pct": 54.2,
+    "lat": 17.5736,
+    "lon": 73.1761,
+    "status": "OPERATIONAL"
+  },
+  {
+    "name": "Ennore",
+    "operator": "Indian Oil Corporation",
+    "capacity_mtpa": 5.0,
+    "utilization_pct": 42.6,
+    "lat": 13.2389,
+    "lon": 80.3261,
+    "status": "OPERATIONAL"
+  },
+  {
+    "name": "Mundra",
+    "operator": "GSPC LNG Limited",
+    "capacity_mtpa": 5.0,
+    "utilization_pct": 61.8,
+    "lat": 22.7392,
+    "lon": 69.7297,
+    "status": "OPERATIONAL"
+  }
+]
