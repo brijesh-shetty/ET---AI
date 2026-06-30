@@ -143,15 +143,43 @@ export interface DemandSubstitutes {
   asOf?: string;
 }
 
+export interface RefineryDemand {
+  name: string;
+  operator: string;
+  capacityMmtpa: number;
+  dailyDemandKbpd: number;
+  gulfExposurePct: number;
+  exposureKbpd: number;
+  grades: string[];
+}
+
+export interface GapForecastPoint {
+  day: number;
+  central: number;
+  low: number;
+  high: number;
+}
+
+export interface ReplenishmentWindow {
+  startDay: number;
+  endDay: number;
+  days: number;
+  estPriceUsd: number;
+  reason: string;
+}
+
 export interface SPRPlan {
   asOf: string;
   totalCapacityMb: number;
   currentFillMb: number;
   coverDays: number;
   projectedCoverDays?: number;
+  troughCoverDays?: number;
   gapClosedPct?: number;
   peakGapKbpd?: number;
   totalUnmetMb?: number;
+  totalReplenishMb?: number;
+  totalDemandKbpd?: number;
   scenarioId?: string | null;
   scenarioLabel?: string;
   targetCoverDays?: number;
@@ -163,13 +191,33 @@ export interface SPRPlan {
     fillMb: number;
     drawRateMbPerDay: number;
   }>;
+  refineryDemand?: RefineryDemand[];
+  gapForecast?: GapForecastPoint[];
+  replenishmentWindows?: ReplenishmentWindow[];
   releaseSchedule: Array<{
     day: number;
     drawMb: number;
+    replenishMb?: number;
     cumulativeMb: number;
+    reserveMb?: number | null;
     targetMarket: string;
   }>;
   rationale: string;
+}
+
+export interface SPRBrief {
+  scenarioId?: string | null;
+  scenarioLabel?: string;
+  urgency: 'low' | 'elevated' | 'high';
+  headline: string;
+  situation: string;
+  narrative: string;
+  actions: string[];
+  tradeoffs: string[];
+  risks: string[];
+  watchItems: string[];
+  plan?: Record<string, number>;
+  generatedAt: string;
 }
 
 export interface FeedItem {
