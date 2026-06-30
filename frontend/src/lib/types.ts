@@ -139,6 +139,14 @@ export interface SPRPlan {
   totalCapacityMb: number;
   currentFillMb: number;
   coverDays: number;
+  projectedCoverDays?: number;
+  gapClosedPct?: number;
+  peakGapKbpd?: number;
+  totalUnmetMb?: number;
+  scenarioId?: string | null;
+  scenarioLabel?: string;
+  targetCoverDays?: number;
+  marketBias?: string;
   sites: Array<{
     name: string;
     location: string;
