@@ -87,12 +87,21 @@ export interface ScenarioResult {
     gdpImpactBps: number;
     inflationImpactBps: number;
     fxImpactInrPerUsd: number;
+    // Headline price move for the scenario's primary commodity. For oil
+    // scenarios this mirrors the Brent uplift; for coal/REE/solar/uranium it is
+    // the move in that commodity (Brent stays flat).
+    primaryCommodity?: Commodity;
+    primaryUpliftPct?: number;
   };
   timeline: Array<{
     day: number;
     brentUsd: number;
     sprDrawDownMb: number;
     routeShareCape: number;
+    refineryRunRatePct?: number;
+    dieselPriceInr?: number;
+    powerStressIndex?: number;
+    gdpGrowthPct?: number;
   }>;
   recommendations: string[];
   generatedAt: string;

@@ -109,6 +109,8 @@ function InvalidateSize({ refreshKey }: { refreshKey: number }) {
   return null;
 }
 
+const DEMAND_COLOR = '#34d399';
+
 interface Layers {
   routes: boolean;
   refineries: boolean;
@@ -116,6 +118,7 @@ interface Layers {
   ports: boolean;
   corridors: boolean;
   sources: boolean;
+  distribution: boolean;
 }
 
 function LayerToggle({
@@ -130,6 +133,7 @@ function LayerToggle({
     { key: 'refineries', label: 'Refineries', color: REFINERY_COLOR },
     { key: 'lng', label: 'LNG terminals', color: LNG_COLOR },
     { key: 'ports', label: 'Ports', color: PORT_COLOR },
+    { key: 'distribution', label: 'Distribution', color: DEMAND_COLOR },
     { key: 'sources', label: 'Foreign sources', color: SOURCE_COLOR },
     { key: 'corridors', label: 'Corridors', color: '#f59e0b' },
   ];
@@ -168,6 +172,7 @@ export default function DigitalTwin() {
     ports: false,
     corridors: true,
     sources: true,
+    distribution: true,
   });
   const [whatIf, setWhatIf] = useState<WhatIf>({
     corridor: null,
@@ -203,6 +208,8 @@ export default function DigitalTwin() {
   const ports = state?.ports ?? [];
   const sources = state?.sources ?? [];
   const routes = state?.supplyRoutes ?? [];
+  const demandCentres = state?.demandCentres ?? [];
+  const distributionLinks = state?.distributionLinks ?? [];
 
   const tileLayer = useMemo(() => tileLayerUrl(), []);
 
@@ -489,6 +496,46 @@ export default function DigitalTwin() {
                       {p.name} · {p.type}
                     </span>
                   </Tooltip>
+                </CircleMarker>
+              ))}
+
+            {/* Distribution: refinery / depot -> domestic demand centre */}
+            {layers.distribution &&
+              distributionLinks.map((d) => (
+                <Polyline
+                  key={d.id}
+                  positions={d.path as [number, number][]}
+                  pathOptions={{ color: DEMAND_COLOR, weight: 1, opacity: 0.45, dashArray: '2 4' }}
+                >
+                  <Tooltip sticky>
+                    <span className="font-mono text-[11px]">
+                      {d.feeder} → {d.hub} · product pipeline
+                    </span>
+                  </Tooltip>
+                </Polyline>
+              ))}
+
+            {/* Domestic demand centres (distribution endpoints) */}
+            {layers.distribution &&
+              demandCentres.map((h) => (
+                <CircleMarker
+                  key={h.name}
+                  center={[h.lat, h.lon]}
+                  radius={Math.max(4, Math.min(9, h.demandIndex / 12))}
+                  pathOptions={{ color: DEMAND_COLOR, fillColor: DEMAND_COLOR, fillOpacity: 0.35, weight: 1.5 }}
+                >
+                  <Tooltip direction="top">
+                    <span className="font-mono text-[11px]">
+                      {h.name} · demand {h.demandIndex}
+                    </span>
+                  </Tooltip>
+                  <Popup>
+                    <div className="font-mono text-[12px]">
+                      <div className="font-semibold">{h.name}</div>
+                      <div>Demand index: {h.demandIndex}</div>
+                      <div>Fed by: {h.fedBy.join(', ')}</div>
+                    </div>
+                  </Popup>
                 </CircleMarker>
               ))}
           </MapContainer>

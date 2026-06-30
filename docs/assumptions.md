@@ -111,7 +111,7 @@ Threshold bands:
 
 ## 4. Scenario parameters
 
-Each scenario lives in `backend/scenarios/<name>.yaml` and is referenced from the UI scenario panel. Parameters listed here are the defaults; users can override before running.
+Each scenario is defined in the `SCENARIOS` dict in `backend/app/engines/scenarios.py` (price/GDP/SPR elasticities) and is referenced from the UI scenario panel. The served projection is computed in `_project_impact()` in `backend/app/api/routes.py`, which reads those same documented elasticities. Parameters listed here are the defaults; users can override intensity and duration before running.
 
 ### 4.1 Hormuz partial closure
 
@@ -168,6 +168,25 @@ Each scenario lives in `backend/scenarios/<name>.yaml` and is referenced from th
 |---|---|
 | NPCIL fuel buffer | ~6 months |
 | Alternative path | Cameco (Canada) contracting |
+
+### 4.8 Sector transmission (refinery run-rate & power-sector stress)
+
+The PS requires each scenario to project **refinery run rates** and **power-sector stress** alongside price and GDP. These are *mechanism-driven*, not a function of the intensity slider alone — `SCENARIO_SECTOR_TRANSMISSION` in `routes.py` sets the maximum deflection at full intensity, scaled by intensity × duration × within-window ramp. Key modelling choices:
+
+- **Only crude/LNG (refinery feedstock) shocks cut refinery run rates.** Coking coal feeds *steel*, not refineries; rare earth / solar / uranium do not touch refineries → run-rate stays at 100%.
+- **Power stress is driven by gas-for-power (LNG) and grid-fuel shortfalls.** Coking coal is *metallurgical, not thermal* → negligible power impact. Uranium feeds nuclear (~3% of generation) behind an ~18-month fuel buffer → small and slow.
+
+| Scenario | Refinery run-rate drop (pp, at full) | Power-stress rise (index pts, at full) |
+|---|---|---|
+| Hormuz partial closure | 22 | 28 |
+| OPEC+ emergency cut | 8 | 6 |
+| Red Sea suspension | 5 | 8 |
+| Australian coking coal | 0 | 2 |
+| China rare earth curbs | 0 | 3 |
+| China solar tariff | 0 | 4 |
+| Kazakhstan uranium | 0 | 6 |
+
+GDP drag is likewise routed through each scenario's **own** channel (Brent→import-bill for oil scenarios; steel-margin for coking coal; EV/wind capex for rare earth; renewable capex for solar; NPP capex for uranium) rather than a single oil-price proxy, so non-oil scenarios register a non-zero, defensible GDP impact. Baselines: refinery run rate 100%, power-stress index 20, diesel ₹92/L, GDP trend 6.5%.
 
 ---
 

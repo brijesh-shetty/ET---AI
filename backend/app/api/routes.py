@@ -420,47 +420,98 @@ def _duration_factor(days: int) -> float:
     return min(1.0, (days / 14.0) ** 0.6)
 
 
+# Per-scenario sector-transmission profile: how a unit of shock intensity
+# propagates into India's *refining* and *power* sectors. Kept explicit and
+# testable in one place (see docs/assumptions.md). Each value is the MAX
+# deflection at full intensity (i=1.0) before duration/within-window scaling.
+#   refinery_runrate_drop_pp : percentage points off refinery run rate (100% base)
+#   power_stress_rise        : points added to the 0-100 power-sector stress index
+# Rationale (why these differ by scenario, not just by the slider):
+#   - Only crude/LNG (refinery feedstock) shocks cut run rates. Coking coal feeds
+#     STEEL, not refineries -> 0. Rare earth / solar / uranium -> 0.
+#   - Power stress is driven by gas-for-power (LNG) and grid-fuel shortfalls.
+#     Coking coal is metallurgical, NOT thermal -> ~0 power impact. Uranium feeds
+#     nuclear (~3% of generation) behind an ~18-month fuel buffer -> small/slow.
+SCENARIO_SECTOR_TRANSMISSION: dict[str, dict[str, float]] = {
+    "hormuz_partial_closure":       {"refinery_runrate_drop_pp": 22.0, "power_stress_rise": 28.0},
+    "opec_emergency_cut":           {"refinery_runrate_drop_pp": 8.0,  "power_stress_rise": 6.0},
+    "red_sea_suspension":           {"refinery_runrate_drop_pp": 5.0,  "power_stress_rise": 8.0},
+    "australia_coking_coal":        {"refinery_runrate_drop_pp": 0.0,  "power_stress_rise": 2.0},
+    "china_rare_earth_curbs":       {"refinery_runrate_drop_pp": 0.0,  "power_stress_rise": 3.0},
+    "china_solar_export_tariff":    {"refinery_runrate_drop_pp": 0.0,  "power_stress_rise": 4.0},
+    "kazakhstan_uranium_disruption":{"refinery_runrate_drop_pp": 0.0,  "power_stress_rise": 6.0},
+}
+
+
 def _project_impact(name: str, intensity: float, duration: int) -> dict:
-    """Compute scenario impact directly from SCENARIOS params."""
+    """Project a named scenario's macro impact from its *documented* SCENARIOS
+    params (single source of truth for the elasticities; see
+    docs/assumptions.md). Returns price uplifts, a mechanism-specific GDP drag,
+    SPR runway, and the per-scenario refinery/power deflections that drive the
+    sector trajectories. Non-oil scenarios surface a primary-commodity uplift
+    and still register a GDP drag via their own capex/output channel."""
     scenario = SCENARIOS[name]
     p = getattr(scenario, "params", {}) or {}
     dur = _duration_factor(duration)
     i = max(0.0, min(1.0, intensity))
+    gpb = p.get("gdp_bps_per_10usd_brent", 18.0)
 
     brent_uplift = 0.0
     lng_uplift = 0.0
     coal_uplift = 0.0
+    primary_uplift = 0.0  # headline price move for the scenario's primary commodity
+    gdp_bps = 0.0
 
     if name == "hormuz_partial_closure":
-        brent_uplift = 100.0 * p.get("crude_price_elasticity", 0.45) * i * p.get("crude_volume_share", 0.40)
-        lng_uplift = 100.0 * p.get("lng_price_elasticity", 0.35) * i * p.get("lng_volume_share", 0.30)
+        brent_uplift = 100.0 * p["crude_price_elasticity"] * i * p["crude_volume_share"]
+        lng_uplift = 100.0 * p["lng_price_elasticity"] * i * p["lng_volume_share"]
     elif name == "opec_emergency_cut":
-        cut = p.get("global_cut_mbd_at_full", 1.0) * i
-        brent_uplift = 100.0 * p.get("crude_price_elasticity_per_mbd", 0.15) * cut
+        # Realised cut scales linearly with intensity; uplift via documented elasticity.
+        brent_uplift = 100.0 * p["crude_price_elasticity"] * i
     elif name == "red_sea_suspension":
-        brent_uplift = 100.0 * p.get("crude_freight_uplift_share", 0.06) * i
-        lng_uplift = 100.0 * p.get("lng_uplift_share", 0.12) * i
+        # Rerouting/freight-driven uplift (no physical supply loss) on crude + LNG.
+        brent_uplift = 100.0 * p["crude_price_elasticity"] * i
+        lng_uplift = 100.0 * p["lng_price_elasticity"] * i
     elif name == "australia_coking_coal":
-        coal_uplift = 100.0 * p.get("coking_coal_elasticity", 0.55) * i * p.get("australia_share", 0.70)
+        coal_uplift = 100.0 * p["coking_coal_elasticity"] * i * p["australia_share"]
     elif name == "china_rare_earth_curbs":
-        brent_uplift = 0.0
+        primary_uplift = 100.0 * p["ree_price_elasticity"] * i * p["china_share"]
     elif name == "china_solar_export_tariff":
-        brent_uplift = 0.0
+        primary_uplift = 100.0 * p["module_price_elasticity"] * i * p["china_module_share"]
     elif name == "kazakhstan_uranium_disruption":
-        brent_uplift = 0.0
+        primary_uplift = 100.0 * p["uranium_price_elasticity"] * i * p["kazakhstan_share"]
 
     brent_uplift *= dur
     lng_uplift *= dur
     coal_uplift *= dur
+    primary_uplift *= dur
 
-    gdp_bps = -(brent_uplift * 1.5 + lng_uplift * 0.6 + coal_uplift * 0.4)
+    # GDP drag (negative bps) routed through each scenario's OWN channel.
+    delta_brent = BASE_BRENT * brent_uplift / 100.0
+    if name in ("hormuz_partial_closure", "opec_emergency_cut", "red_sea_suspension"):
+        gdp_bps = -((delta_brent / 10.0) * gpb + lng_uplift * 0.6)
+    elif name == "australia_coking_coal":
+        gdp_bps = -(coal_uplift / 10.0) * p.get("steel_output_drag_bps_per_10pct_price", 4.5)
+    elif name == "china_rare_earth_curbs":
+        gdp_bps = -p.get("gdp_bps_per_pp_ev_capex_drag", 1.2) * p.get("ev_battery_pass_through_pct", 6.0) * i * dur
+    elif name == "china_solar_export_tariff":
+        gdp_bps = -p.get("renewable_capex_drag_bps", 2.5) * i * dur
+    elif name == "kazakhstan_uranium_disruption":
+        gdp_bps = -p.get("npp_capex_drag_bps", 0.8) * i * dur
+
     spr_runway = max(2.0, BASE_SPR_DAYS - (brent_uplift / 10.0))
+    tx = SCENARIO_SECTOR_TRANSMISSION.get(
+        name, {"refinery_runrate_drop_pp": 0.0, "power_stress_rise": 0.0}
+    )
     return {
         "brent_uplift_pct": round(brent_uplift, 2),
         "lng_uplift_pct": round(lng_uplift, 2),
         "coal_uplift_pct": round(coal_uplift, 2),
+        "primary_uplift_pct": round(primary_uplift, 2),
         "gdp_bps": round(gdp_bps, 1),
         "spr_runway_days": round(spr_runway, 1),
+        "refinery_drop_pp": round(tx["refinery_runrate_drop_pp"] * i * dur, 2),
+        "power_stress_rise": round(tx["power_stress_rise"] * i * dur, 2),
     }
 
 
@@ -491,15 +542,36 @@ async def run_scenario_endpoint(name: str, body: dict | None = None) -> dict:
     inflation_bps = round(gdp_bps * 0.85, 1)
     fx_impact = round(brent_uplift_pct * 0.18, 2)
 
+    # Baselines for the PS-required trajectories.
+    BASE_REFINERY_RUN = 100.0  # % of nameplate run rate
+    BASE_DIESEL = 92.0  # Rs/L domestic pump
+    BASE_POWER_STRESS = 20.0  # 0-100 power-sector stress index
+    BASE_GDP_GROWTH = 6.5  # % annualised GDP trajectory
+
+    # Trajectory deflections come from the scenario's transmission profile, not
+    # the slider alone: a uranium shock barely touches refineries, a Hormuz
+    # closure starves them. Already intensity- and duration-scaled in _project_impact.
+    refinery_drop = impact["refinery_drop_pp"]  # crude/LNG feedstock starvation
+    diesel_rise_pct = brent_uplift_pct * 0.55  # crude -> pump passthrough
+    power_stress_rise = impact["power_stress_rise"]  # gas-for-power / grid-fuel shortfall
+    gdp_drag_pp = abs(gdp_bps) / 100.0  # bps -> percentage points off growth
+
     timeline = []
     for day in range(0, duration + 1, max(1, duration // 12)):
         progress = day / max(1, duration)
         ramp = min(1.0, progress * 1.4)
+        # GDP trajectory recovers partially after the peak (resilience response).
+        recovery = max(0.0, (progress - 0.7) / 0.3) if progress > 0.7 else 0.0
+        gdp_effect = gdp_drag_pp * ramp * (1.0 - 0.4 * recovery)
         timeline.append({
             "day": day,
             "brentUsd": round(BASE_BRENT + (projected_brent - BASE_BRENT) * ramp, 2),
             "sprDrawDownMb": round(0.85 * ramp, 3),
             "routeShareCape": round(0.42 * ramp, 3),
+            "refineryRunRatePct": round(BASE_REFINERY_RUN - refinery_drop * ramp, 1),
+            "dieselPriceInr": round(BASE_DIESEL * (1 + diesel_rise_pct / 100.0 * ramp), 1),
+            "powerStressIndex": round(min(100.0, BASE_POWER_STRESS + power_stress_rise * ramp), 1),
+            "gdpGrowthPct": round(BASE_GDP_GROWTH - gdp_effect, 2),
         })
 
     recommendations = [s.strip() for s in narrative.split(".") if s.strip()]
@@ -532,6 +604,15 @@ async def run_scenario_endpoint(name: str, body: dict | None = None) -> dict:
             "gdpImpactBps": round(gdp_bps, 1),
             "inflationImpactBps": inflation_bps,
             "fxImpactInrPerUsd": fx_impact,
+            # Headline price move for the scenario's primary commodity. For oil
+            # scenarios this mirrors the Brent uplift; for coal/REE/solar/uranium
+            # it is the move in that commodity (Brent stays flat).
+            "primaryCommodity": _scenario_commodity(name),
+            "primaryUpliftPct": (
+                coal_uplift_pct if name == "australia_coking_coal"
+                else impact["primary_uplift_pct"] if impact["primary_uplift_pct"] > 0
+                else brent_uplift_pct
+            ),
         },
         "timeline": timeline,
         "recommendations": recommendations,
@@ -603,6 +684,8 @@ async def twin_state() -> dict:
         "ports": network["ports"],
         "sources": network["sources"],
         "supplyRoutes": network["supplyRoutes"],
+        "demandCentres": network["demandCentres"],
+        "distributionLinks": network["distributionLinks"],
     }
 
 
@@ -636,6 +719,19 @@ _INDIA_PORTS: list[dict] = [
     {"name": "Visakhapatnam", "lat": 17.69, "lon": 83.22, "type": "crude + coal + SPR"},
     {"name": "Ennore", "lat": 13.25, "lon": 80.32, "type": "LNG + coal"},
     {"name": "Dhamra", "lat": 20.78, "lon": 86.95, "type": "coking coal"},
+]
+
+# Domestic demand centres (the 'distribution' end of wellhead -> refinery ->
+# distribution) and the product pipelines / corridors that feed them.
+_DEMAND_CENTRES: list[dict] = [
+    {"name": "Delhi NCR", "lat": 28.61, "lon": 77.21, "demandIndex": 100, "fedBy": ["Mathura", "Panipat"]},
+    {"name": "Mumbai-Pune", "lat": 18.85, "lon": 73.30, "demandIndex": 95, "fedBy": ["Mumbai", "Jamnagar"]},
+    {"name": "Bengaluru", "lat": 12.97, "lon": 77.59, "demandIndex": 78, "fedBy": ["Chennai", "Kochi"]},
+    {"name": "Chennai", "lat": 13.08, "lon": 80.27, "demandIndex": 72, "fedBy": ["Chennai", "Ennore"]},
+    {"name": "Kolkata", "lat": 22.57, "lon": 88.36, "demandIndex": 70, "fedBy": ["Paradip", "Haldia"]},
+    {"name": "Hyderabad", "lat": 17.39, "lon": 78.49, "demandIndex": 68, "fedBy": ["Visakhapatnam"]},
+    {"name": "Ahmedabad", "lat": 23.02, "lon": 72.57, "demandIndex": 66, "fedBy": ["Jamnagar", "Vadinar"]},
+    {"name": "Lucknow-Kanpur", "lat": 26.85, "lon": 80.95, "demandIndex": 60, "fedBy": ["Mathura", "Panipat"]},
 ]
 
 
@@ -714,12 +810,44 @@ def _india_supply_network(corridor_status: dict[str, str]) -> dict:
             ],
         })
 
+    # Distribution layer: refinery / depot -> domestic demand centre. Each
+    # demand centre is fed by one or more named refineries; we draw a product
+    # pipeline from the supplying refinery's coordinates (falling back to the
+    # nearest known refinery/port) to the demand centre.
+    coord_lookup: dict[str, tuple[float, float]] = {}
+    for r in refineries:
+        if r.get("lat") is not None and r.get("lon") is not None:
+            coord_lookup[r["name"]] = (r["lat"], r["lon"])
+    for p in _INDIA_PORTS:
+        coord_lookup.setdefault(p["name"], (p["lat"], p["lon"]))
+    # A couple of depots referenced in fedBy that aren't refineries/ports.
+    coord_lookup.setdefault("Mathura", (27.49, 77.67))
+    coord_lookup.setdefault("Panipat", (29.39, 76.97))
+    coord_lookup.setdefault("Mumbai", (19.00, 72.85))
+    coord_lookup.setdefault("Haldia", (22.06, 88.06))
+
+    distribution_links = []
+    for hub in _DEMAND_CENTRES:
+        for feeder in hub.get("fedBy", []):
+            src = coord_lookup.get(feeder)
+            if not src:
+                continue
+            distribution_links.append({
+                "id": f"{feeder}-{hub['name']}",
+                "feeder": feeder,
+                "hub": hub["name"],
+                "demandIndex": hub["demandIndex"],
+                "path": [[src[0], src[1]], [hub["lat"], hub["lon"]]],
+            })
+
     return {
         "refineries": refineries,
         "lngTerminals": lng_terminals,
         "ports": _INDIA_PORTS,
         "sources": _SUPPLY_SOURCES,
         "supplyRoutes": supply_routes,
+        "demandCentres": _DEMAND_CENTRES,
+        "distributionLinks": distribution_links,
     }
 
 

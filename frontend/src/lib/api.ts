@@ -186,6 +186,22 @@ export interface TwinSupplyRoute {
   path: Array<[number, number]>;
 }
 
+export interface TwinDemandCentre {
+  name: string;
+  lat: number;
+  lon: number;
+  demandIndex: number;
+  fedBy: string[];
+}
+
+export interface TwinDistributionLink {
+  id: string;
+  feeder: string;
+  hub: string;
+  demandIndex: number;
+  path: Array<[number, number]>;
+}
+
 export interface TwinState {
   asOf: string;
   corridors: Array<{
@@ -202,6 +218,8 @@ export interface TwinState {
   ports?: TwinPort[];
   sources?: TwinSource[];
   supplyRoutes?: TwinSupplyRoute[];
+  demandCentres?: TwinDemandCentre[];
+  distributionLinks?: TwinDistributionLink[];
 }
 
 export function getTwinState(): Promise<TwinState> {

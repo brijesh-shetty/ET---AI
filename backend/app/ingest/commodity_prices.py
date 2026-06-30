@@ -41,9 +41,23 @@ _EIA_SERIES = {
     Commodity.LNG: ("natural-gas/pri/fut/data/", "RNGWHHD", "USD/MMBtu"),
 }
 
+# Alpha Vantage commodity functions (free tier). Covers the metals/energy EIA
+# does not. https://www.alphavantage.co/documentation/#commodity
+_ALPHA_VANTAGE_FUNC = {
+    Commodity.CRUDE_OIL: ("BRENT", "USD/bbl"),
+    Commodity.COPPER: ("COPPER", "USD/t"),
+    Commodity.LNG: ("NATURAL_GAS", "USD/MMBtu"),
+}
+_AV_BASE = "https://www.alphavantage.co/query"
+
 
 async def fetch_prices(commodity: Commodity, days: int = 30) -> list[dict]:
-    """Return a daily price series for the given commodity over `days`."""
+    """Return a daily price series for the given commodity over `days`.
+
+    Source priority in live mode: EIA (crude/gas) -> Alpha Vantage (metals/
+    energy) -> fixture. Each falls back gracefully so a missing key or a failed
+    call never breaks the caller.
+    """
     if not settings.allow_live_ingest:
         log.info("prices.fixture_mode", commodity=commodity.value, days=days)
         return _load_fixture(commodity, days)
@@ -54,7 +68,35 @@ async def fetch_prices(commodity: Commodity, days: int = 30) -> list[dict]:
         except httpx.HTTPError as exc:
             log.warning("prices.eia_failed", commodity=commodity.value, error=str(exc))
 
+    if commodity in _ALPHA_VANTAGE_FUNC and settings.alpha_vantage_api_key:
+        try:
+            return await _fetch_alpha_vantage(commodity, days)
+        except (httpx.HTTPError, KeyError, ValueError) as exc:
+            log.warning("prices.av_failed", commodity=commodity.value, error=str(exc))
+
     return _load_fixture(commodity, days)
+
+
+async def _fetch_alpha_vantage(commodity: Commodity, days: int) -> list[dict]:
+    func, unit = _ALPHA_VANTAGE_FUNC[commodity]
+    params = {
+        "function": func,
+        "interval": "daily",
+        "apikey": settings.alpha_vantage_api_key,
+    }
+    async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        resp = await client.get(_AV_BASE, params=params)
+        resp.raise_for_status()
+        payload = resp.json()
+    rows = payload.get("data", [])
+    out: list[dict] = []
+    for r in rows[:days]:
+        try:
+            out.append({"date": r["date"], "price": float(r["value"]), "unit": unit})
+        except (KeyError, ValueError, TypeError):
+            continue
+    out.reverse()  # API returns newest-first; callers expect ascending
+    return out
 
 
 async def _fetch_eia(commodity: Commodity, days: int) -> list[dict]:

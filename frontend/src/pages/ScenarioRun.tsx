@@ -4,6 +4,7 @@ import {
   CartesianGrid,
   Line,
   LineChart,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -99,6 +100,17 @@ export default function ScenarioRun() {
     }));
   }, [result]);
 
+  const trajectoryData = useMemo(() => {
+    if (!result) return [];
+    return result.timeline.map((t) => ({
+      day: t.day,
+      refinery: t.refineryRunRatePct ?? null,
+      diesel: t.dieselPriceInr ?? null,
+      power: t.powerStressIndex ?? null,
+      gdp: t.gdpGrowthPct ?? null,
+    }));
+  }, [result]);
+
   const brentUplift = result ? delta(result.projected.brentUsd, result.baseline.brentUsd) : 0;
   const sprDelta = result
     ? result.baseline.sprCoverDays - result.projected.sprCoverDays
@@ -175,6 +187,7 @@ export default function ScenarioRun() {
               value={result.projected.gdpImpactBps}
               max={120}
               format="bps"
+              positiveIsBad={false}
               sub="vs. baseline trajectory"
             />
             <ImpactBar
@@ -202,6 +215,42 @@ export default function ScenarioRun() {
                   <Line yAxisId="usd" type="monotone" dataKey="brent" name="Brent (USD)" stroke="#fbbf24" strokeWidth={2} dot={false} />
                   <Line yAxisId="mb" type="monotone" dataKey="sprDraw" name="SPR daily draw (MB)" stroke="#818cf8" strokeWidth={2} dot={false} />
                   <Line yAxisId="mb" type="monotone" dataKey="capeRoute" name="Cape rerouting (%)" stroke="#34d399" strokeWidth={1.5} strokeDasharray="4 3" dot={false} />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          </section>
+
+          <section className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+            <h3 className="mb-1 text-sm font-semibold text-slate-100">
+              Sector trajectory under the shock
+            </h3>
+            <p className="mb-3 text-[11px] text-slate-500">
+              Refinery run rate, domestic diesel price, power-sector stress, and GDP growth over the
+              disruption window.
+            </p>
+            <div className="h-72 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={trajectoryData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                  <CartesianGrid stroke="#1e293b" strokeDasharray="3 3" />
+                  <XAxis dataKey="day" stroke="#64748b" tick={{ fill: '#94a3b8', fontSize: 11 }} />
+                  <YAxis yAxisId="pct" stroke="#64748b" tick={{ fill: '#94a3b8', fontSize: 11 }} domain={[0, 110]} />
+                  <YAxis yAxisId="gdp" orientation="right" stroke="#34d399" tick={{ fill: '#34d399', fontSize: 11 }} domain={[5, 7]} />
+                  <Tooltip
+                    contentStyle={{ background: '#0f172a', border: '1px solid #334155', borderRadius: 8, fontSize: 12 }}
+                    labelStyle={{ color: '#94a3b8' }}
+                  />
+                  <ReferenceLine
+                    yAxisId="gdp"
+                    y={6.5}
+                    stroke="#34d399"
+                    strokeOpacity={0.4}
+                    strokeDasharray="2 4"
+                    label={{ value: 'GDP trend 6.5%', position: 'insideTopRight', fill: '#34d399', fontSize: 10 }}
+                  />
+                  <Line yAxisId="pct" type="monotone" dataKey="refinery" name="Refinery run rate (%)" stroke="#60a5fa" strokeWidth={2} dot={false} />
+                  <Line yAxisId="pct" type="monotone" dataKey="power" name="Power stress index" stroke="#f97316" strokeWidth={2} dot={false} />
+                  <Line yAxisId="pct" type="monotone" dataKey="diesel" name="Diesel (Rs/L)" stroke="#fbbf24" strokeWidth={1.5} strokeDasharray="4 3" dot={false} />
+                  <Line yAxisId="gdp" type="monotone" dataKey="gdp" name="GDP growth (%)" stroke="#34d399" strokeWidth={2.5} dot={false} />
                 </LineChart>
               </ResponsiveContainer>
             </div>
