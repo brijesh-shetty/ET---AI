@@ -167,6 +167,8 @@ export interface SPRPlanRequest {
   targetCoverDays: number;
   horizonDays: number;
   marketBias?: 'north' | 'south' | 'balanced';
+  scenarioId?: string | null;
+  intensity?: number;
   notes?: string;
 }
 

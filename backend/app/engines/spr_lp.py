@@ -34,6 +34,11 @@ class SPRConfig:
     planning_horizon_days: int
     price_impact_coef: float = 1.0
     replenish_cost_coef: float = 0.05
+    # Soft floor: reserve we want to keep in the tank. Dropping below it is
+    # allowed (so the LP never goes infeasible) but penalised, so a higher
+    # target cover makes the plan draw down more conservatively / rebuild faster.
+    reserve_floor_mmb: float = 0.0
+    floor_penalty_coef: float = 0.4
 
     def __post_init__(self) -> None:
         if self.planning_horizon_days <= 0:
@@ -108,10 +113,23 @@ def solve_spr_plan(config: SPRConfig) -> SPRPlan:
     ]
     reserve = [pulp.LpVariable(f"sp_{t}", lowBound=0.0) for t in range(horizon)]
 
-    prob += pulp.lpSum(
+    use_floor = config.reserve_floor_mmb > 0.0
+    # Slack for dropping below the desired reserve floor (only when a floor is set).
+    floor_short = (
+        [pulp.LpVariable(f"fs_{t}", lowBound=0.0) for t in range(horizon)]
+        if use_floor
+        else None
+    )
+
+    objective = pulp.lpSum(
         config.price_impact_coef * u[t] + config.replenish_cost_coef * r[t]
         for t in range(horizon)
     )
+    if use_floor and floor_short is not None:
+        objective += pulp.lpSum(
+            config.floor_penalty_coef * floor_short[t] for t in range(horizon)
+        )
+    prob += objective
 
     for t in range(horizon):
         prev = config.starting_reserve_mmb if t == 0 else reserve[t - 1]
@@ -120,6 +138,11 @@ def solve_spr_plan(config: SPRConfig) -> SPRPlan:
             == prev - _kbpd_to_mmb_per_day(d[t]) + _kbpd_to_mmb_per_day(r[t])
         ), f"reserve_balance_{t}"
         prob += d[t] - r[t] + u[t] == gap[t], f"supply_balance_{t}"
+        if use_floor and floor_short is not None:
+            # reserve[t] + floor_short[t] >= floor  →  shortfall penalised
+            prob += (
+                reserve[t] + floor_short[t] >= config.reserve_floor_mmb
+            ), f"reserve_floor_{t}"
 
     solver = pulp.PULP_CBC_CMD(msg=False)
     prob.solve(solver)

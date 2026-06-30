@@ -1066,53 +1066,135 @@ async def sourcing_substitutes(commodity: str) -> dict:
     }
 
 
-def _build_spr_plan(horizon: int = 60, target_cover_days: float = 12.0, bias: str = "balanced") -> dict:
+DAILY_CONSUMPTION_KBPD = 4800.0  # crude throughput basis used to size a shortfall
+
+# Each cavern's market orientation, used to skew per-site drawdown under a bias.
+_SPR_SITES = [
+    {"name": "Visakhapatnam", "location": "Andhra Pradesh", "capacityMb": 9.77, "fillMb": 7.6, "market": "north"},
+    {"name": "Mangalore", "location": "Karnataka", "capacityMb": 11.0, "fillMb": 8.8, "market": "south"},
+    {"name": "Padur", "location": "Karnataka", "capacityMb": 18.3, "fillMb": 14.2, "market": "south"},
+]
+
+
+def _spr_gap_curve(horizon: int, scenario_id: str | None, intensity: float) -> tuple[list[float], float, str]:
+    """Build the daily crude supply-gap curve (kbpd) that the SPR must cover.
+
+    Driven by the selected scenario when given: the peak shortfall scales with
+    the scenario's at-risk crude volume share and the shock intensity. Falls
+    back to a generic 21-day shortfall when no scenario is selected.
+    """
+    shock_days = min(21, max(7, horizon // 3))
+    if scenario_id and scenario_id in SCENARIOS:
+        p = getattr(SCENARIOS[scenario_id], "params", {}) or {}
+        share = p.get("crude_volume_share")
+        if share is None:
+            cut_mbd = p.get("global_cut_mbd_at_full")
+            share = (float(cut_mbd) * 1000.0 / DAILY_CONSUMPTION_KBPD) if cut_mbd else 0.0
+        peak = DAILY_CONSUMPTION_KBPD * float(share) * max(0.0, min(1.0, intensity))
+        label = f"{_humanize(scenario_id)} ({intensity:.0%} intensity)"
+    else:
+        peak = 2000.0
+        label = "Generic 21-day crude shortfall"
+
+    curve: list[float] = []
+    for d in range(horizon):
+        if d < shock_days:
+            curve.append(round(peak, 1))
+        elif d < 2 * shock_days:
+            curve.append(round(peak * 0.4, 1))
+        else:
+            curve.append(0.0)
+    return curve, round(peak, 1), label
+
+
+def _build_spr_plan(
+    horizon: int = 60,
+    target_cover_days: float = 6.0,
+    bias: str = "balanced",
+    scenario_id: str | None = None,
+    intensity: float = 0.5,
+) -> dict:
+    sites = [dict(s) for s in _SPR_SITES]
+    total_capacity = sum(s["capacityMb"] for s in sites)
+    current_fill = sum(s["fillMb"] for s in sites)
+
+    # Days-of-import cover basis, anchored so current fill reads as BASE_SPR_DAYS;
+    # cover and the target-cover reserve floor share this single basis.
+    import_mmb_day = current_fill / BASE_SPR_DAYS if BASE_SPR_DAYS else 3.2
+    reserve_floor = round(target_cover_days * import_mmb_day, 3)
+
+    gap_curve, peak_gap, scenario_label = _spr_gap_curve(horizon, scenario_id, intensity)
+
     config = spr_engine.SPRConfig(
-        starting_reserve_mmb=39.0,
+        starting_reserve_mmb=round(current_fill, 3),
         max_daily_drawdown_kbpd=600.0,
         max_daily_replenish_kbpd=300.0,
-        daily_consumption_kbpd=4800.0,
-        supply_gap_curve=[2000.0 if d < 21 else 800.0 if d < 42 else 0.0 for d in range(horizon)],
+        daily_consumption_kbpd=DAILY_CONSUMPTION_KBPD,
+        supply_gap_curve=gap_curve,
         planning_horizon_days=horizon,
+        reserve_floor_mmb=reserve_floor,
+        # Unmet shortfall is weighted in kbpd; the floor slack is in MMb (a 1000x
+        # smaller scale). Scale the penalty past that conversion so the floor acts
+        # as a near-hard drawdown limit: a higher target cover preserves reserve
+        # at the cost of leaving more of the shortfall uncovered.
+        floor_penalty_coef=1500.0,
     )
     try:
         plan = spr_engine.solve_spr_plan(config)
     except Exception:
         plan = None
 
-    today = datetime.now(timezone.utc).date()
-    release_schedule = []
-    sites = [
-        {"name": "Visakhapatnam", "location": "Andhra Pradesh", "capacityMb": 9.77, "fillMb": 7.6, "drawRateMbPerDay": 0.25},
-        {"name": "Mangalore", "location": "Karnataka", "capacityMb": 11.0, "fillMb": 8.8, "drawRateMbPerDay": 0.28},
-        {"name": "Padur", "location": "Karnataka", "capacityMb": 18.3, "fillMb": 14.2, "drawRateMbPerDay": 0.42},
-    ]
-    total_capacity = sum(s["capacityMb"] for s in sites)
-    current_fill = sum(s["fillMb"] for s in sites)
+    release_schedule: list[dict] = []
+    gap_closed_pct = 0.0
+    total_unmet_mb = 0.0
+    projected_cover_days = round(current_fill / import_mmb_day, 1)
+    avg_active_draw = 0.0
+    solver_status = "unavailable"
 
     if plan is not None:
-        days_list = getattr(plan, "days", list(range(horizon)))
+        solver_status = getattr(plan, "status", "unknown")
         drawdown_kbpd = getattr(plan, "drawdown_kbpd", [])
+        reserve_series = getattr(plan, "reserve_mmb", [])
         cumulative = 0.0
-        for i, day in enumerate(days_list[:horizon]):
+        active_draws: list[float] = []
+        for i in range(horizon):
             draw = float(drawdown_kbpd[i]) / 1000.0 if i < len(drawdown_kbpd) else 0.0
             cumulative += draw
+            if draw > 1e-4:
+                active_draws.append(draw)
             release_schedule.append({
-                "day": int(day),
+                "day": i,
                 "drawMb": round(draw, 3),
                 "cumulativeMb": round(cumulative, 3),
-                "targetMarket": "north" if bias != "south" else "south",
+                "targetMarket": bias,
             })
+        avg_active_draw = sum(active_draws) / len(active_draws) if active_draws else 0.0
+        total_unmet_mb = round(sum(getattr(plan, "unmet_gap_kbpd", [])) / 1000.0, 2)
+
+        # Quantify the LP's contribution vs taking no action at all.
+        try:
+            baseline = spr_engine.baseline_no_action_plan(config)
+            base_impact = getattr(baseline, "total_impact_score", 0.0)
+            lp_impact = getattr(plan, "total_impact_score", 0.0)
+            gap_closed_pct = round((base_impact - lp_impact) / base_impact * 100.0, 1) if base_impact > 0 else 0.0
+        except Exception:
+            gap_closed_pct = 0.0
+
+        if reserve_series:
+            projected_cover_days = round(float(reserve_series[-1]) / import_mmb_day, 1)
+
         rationale = (
-            f"LP minimises integrated price-impact over {horizon} days subject to "
-            f"injection-rate, reserve, and consumption constraints. Target cover "
-            f"{target_cover_days:.1f} days, bias {bias}. Solver status: "
-            f"{getattr(plan, 'status', 'unknown')}."
+            f"LP minimises price-impact-weighted unmet crude shortfall over {horizon} days "
+            f"against the {scenario_label} shock (peak {peak_gap:.0f} kbpd), subject to "
+            f"reserve balance, 600/300 kbpd draw/replenish limits, and a soft floor of "
+            f"{reserve_floor:.1f} MB (~{target_cover_days:.0f} days cover). It closes "
+            f"{gap_closed_pct:.0f}% of the no-action price impact, leaving {total_unmet_mb:.1f} MB "
+            f"of shortfall uncovered, and ends the window at {projected_cover_days:.1f} days of "
+            f"cover. Allocation biased {bias}. Solver status: {solver_status}."
         )
     else:
         for d in range(horizon):
-            shock = 1.0 if d < 14 else 0.5 if d < 28 else 0.0
-            draw = round(0.85 * shock, 3)
+            draw = round(0.85 if d < 14 else 0.42 if d < 28 else 0.0, 3)
             cum = release_schedule[-1]["cumulativeMb"] + draw if release_schedule else draw
             release_schedule.append({
                 "day": d,
@@ -1120,16 +1202,38 @@ def _build_spr_plan(horizon: int = 60, target_cover_days: float = 12.0, bias: st
                 "cumulativeMb": round(cum, 3),
                 "targetMarket": bias,
             })
+        avg_active_draw = 0.85
         rationale = (
-            f"Heuristic schedule (LP solver unavailable). Target cover {target_cover_days:.1f} days, "
-            f"bias {bias}. Switch to PuLP CBC for the full optimisation."
+            f"Heuristic schedule (LP solver unavailable). Target cover {target_cover_days:.0f} days, "
+            f"bias {bias}, {scenario_label} shock. Install PuLP CBC for the full optimisation."
         )
+
+    # Distribute the representative daily drawdown across caverns by capacity,
+    # skewed toward the sites that serve the chosen market bias.
+    weights = []
+    for s in sites:
+        w = float(s["capacityMb"])
+        if bias in ("north", "south") and s["market"] == bias:
+            w *= 1.6
+        weights.append(w)
+    total_weight = sum(weights) or 1.0
+    for s, w in zip(sites, weights):
+        s["drawRateMbPerDay"] = round(avg_active_draw * (w / total_weight), 3)
+        s.pop("market", None)
 
     return {
         "asOf": _now_iso(),
         "totalCapacityMb": round(total_capacity, 2),
         "currentFillMb": round(current_fill, 2),
-        "coverDays": round(BASE_SPR_DAYS, 1),
+        "coverDays": round(current_fill / import_mmb_day, 1),
+        "projectedCoverDays": projected_cover_days,
+        "gapClosedPct": gap_closed_pct,
+        "peakGapKbpd": peak_gap,
+        "totalUnmetMb": total_unmet_mb,
+        "scenarioId": scenario_id,
+        "scenarioLabel": scenario_label,
+        "targetCoverDays": round(target_cover_days, 1),
+        "marketBias": bias,
         "sites": sites,
         "releaseSchedule": release_schedule,
         "rationale": rationale,
@@ -1145,9 +1249,19 @@ async def get_spr_plan() -> dict:
 async def post_spr_plan(body: dict | None = None) -> dict:
     body = body or {}
     horizon = int(body.get("horizonDays", 60))
-    target = float(body.get("targetCoverDays", 12.0))
+    target = float(body.get("targetCoverDays", 6.0))
     bias = str(body.get("marketBias", "balanced"))
-    return _build_spr_plan(horizon=horizon, target_cover_days=target, bias=bias)
+    scenario_id = body.get("scenarioId") or None
+    intensity = float(body.get("intensity", body.get("shockSeverity", 0.5)))
+    if scenario_id is not None and scenario_id not in SCENARIOS:
+        raise HTTPException(status_code=404, detail=f"Unknown scenario: {scenario_id}")
+    return _build_spr_plan(
+        horizon=horizon,
+        target_cover_days=target,
+        bias=bias,
+        scenario_id=scenario_id,
+        intensity=intensity,
+    )
 
 
 _FABRICATED_HOSTS = (
