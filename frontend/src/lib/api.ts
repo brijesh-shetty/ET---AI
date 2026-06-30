@@ -9,6 +9,7 @@ import {
   ScenarioResult,
   SourcingOption,
   SPRPlan,
+  SPRBrief,
   Corridor,
   Commodity,
 } from './types';
@@ -248,6 +249,14 @@ export function postSPRPlan(req: SPRPlanRequest): Promise<SPRPlan> {
   return request<SPRPlan>({
     method: 'POST',
     url: '/spr/plan',
+    data: req,
+  });
+}
+
+export function postSPRBrief(req: SPRPlanRequest): Promise<SPRBrief> {
+  return request<SPRBrief>({
+    method: 'POST',
+    url: '/spr/brief',
     data: req,
   });
 }

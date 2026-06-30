@@ -37,6 +37,7 @@ from app.llm.prompts import (
     build_recommendation_prompt,
     build_risk_summary_prompt,
     build_scenario_narrative_prompt,
+    build_spr_brief_prompt,
 )
 
 if TYPE_CHECKING:
@@ -252,6 +253,16 @@ class LLMClient:
             model=self._synthesis_model,
             user_prompt=prompt,
             fixture_key="chat_default",
+            max_tokens=_DEFAULT_MAX_TOKENS,
+        )
+
+    async def spr_brief(self, plan: dict[str, Any]) -> str:
+        """Decision-support narrative over a solved SPR drawdown plan."""
+        prompt = build_spr_brief_prompt(plan)
+        return await self._complete(
+            model=self._synthesis_model,
+            user_prompt=prompt,
+            fixture_key="spr_brief",
             max_tokens=_DEFAULT_MAX_TOKENS,
         )
 

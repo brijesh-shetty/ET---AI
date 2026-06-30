@@ -39,6 +39,16 @@ class SPRConfig:
     # target cover makes the plan draw down more conservatively / rebuild faster.
     reserve_floor_mmb: float = 0.0
     floor_penalty_coef: float = 0.4
+    # Physical tank ceiling (Mbbl); 0 means uncapped. Reserve cannot exceed it.
+    capacity_mmb: float = 0.0
+    # Per-day mask of when replenishment is permitted (a replenishment window).
+    # None means "any day the supply gap is zero" is treated as a window.
+    replenish_allowed: Optional[List[bool]] = None
+    # Reward (per Mbbl) for the reserve standing at the end of the horizon, so the
+    # LP refills in a replenishment window after the shock rather than ending at
+    # the trough. Kept below the unmet-shortfall weight so it never starves the
+    # live drawdown.
+    rebuild_reward_coef: float = 0.0
 
     def __post_init__(self) -> None:
         if self.planning_horizon_days <= 0:
@@ -99,19 +109,33 @@ def solve_spr_plan(config: SPRConfig) -> SPRPlan:
 
     prob = pulp.LpProblem("spr_drawdown", pulp.LpMinimize)
 
+    # Replenishment is only permitted inside a window. Default: any day the
+    # supply gap has cleared (you don't refill mid-shortage).
+    if config.replenish_allowed is not None:
+        allowed = list(config.replenish_allowed)
+    else:
+        allowed = [gap[t] <= 0.0 for t in range(horizon)]
+
     d = [
         pulp.LpVariable(f"d_{t}", lowBound=0.0, upBound=config.max_daily_drawdown_kbpd)
         for t in range(horizon)
     ]
     r = [
-        pulp.LpVariable(f"r_{t}", lowBound=0.0, upBound=config.max_daily_replenish_kbpd)
+        pulp.LpVariable(
+            f"r_{t}",
+            lowBound=0.0,
+            upBound=config.max_daily_replenish_kbpd if (t < len(allowed) and allowed[t]) else 0.0,
+        )
         for t in range(horizon)
     ]
     u = [
         pulp.LpVariable(f"u_{t}", lowBound=0.0, upBound=max(0.0, gap[t]))
         for t in range(horizon)
     ]
-    reserve = [pulp.LpVariable(f"sp_{t}", lowBound=0.0) for t in range(horizon)]
+    reserve_ub = config.capacity_mmb if config.capacity_mmb > 0 else None
+    reserve = [
+        pulp.LpVariable(f"sp_{t}", lowBound=0.0, upBound=reserve_ub) for t in range(horizon)
+    ]
 
     use_floor = config.reserve_floor_mmb > 0.0
     # Slack for dropping below the desired reserve floor (only when a floor is set).
@@ -129,6 +153,9 @@ def solve_spr_plan(config: SPRConfig) -> SPRPlan:
         objective += pulp.lpSum(
             config.floor_penalty_coef * floor_short[t] for t in range(horizon)
         )
+    if config.rebuild_reward_coef > 0.0 and horizon > 0:
+        # Reward end-of-horizon reserve so post-shock windows are used to refill.
+        objective += -config.rebuild_reward_coef * reserve[horizon - 1]
     prob += objective
 
     for t in range(horizon):
@@ -137,7 +164,10 @@ def solve_spr_plan(config: SPRConfig) -> SPRPlan:
             reserve[t]
             == prev - _kbpd_to_mmb_per_day(d[t]) + _kbpd_to_mmb_per_day(r[t])
         ), f"reserve_balance_{t}"
-        prob += d[t] - r[t] + u[t] == gap[t], f"supply_balance_{t}"
+        # Drawdown plus unmet shortfall must cover the day's gap. Replenishment
+        # is independent (it rebuilds the tank during a window), not a way to
+        # cover a live shortfall.
+        prob += d[t] + u[t] == max(0.0, gap[t]), f"supply_balance_{t}"
         if use_floor and floor_short is not None:
             # reserve[t] + floor_short[t] >= floor  →  shortfall penalised
             prob += (

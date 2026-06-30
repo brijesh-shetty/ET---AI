@@ -417,6 +417,34 @@ def build_impact_cascade_prompt(
     )
 
 
+def build_spr_brief_prompt(plan: dict[str, Any]) -> str:
+    """Prompt for a Strategic Petroleum Reserve decision-support brief.
+
+    Input is the solved SPR plan dict (cover days, projected/trough cover,
+    gap-closed %, peak shortfall, uncovered Mbbl, refinery exposure,
+    replenishment windows, rationale). The model turns the optimiser output into
+    a short policymaker brief actionable under time pressure.
+    """
+    return (
+        f"{SYSTEM_ANALYST}\n\n"
+        "You are briefing a policymaker on a Strategic Petroleum Reserve drawdown "
+        "plan produced by a linear-program optimiser. Turn the numbers into a "
+        "concise, decisive brief they can act on in minutes.\n\n"
+        "SPR PLAN:\n"
+        f"{_compact_json(plan)}\n\n"
+        "Write four short plain-text paragraphs, no markdown headers or bullets:\n"
+        "1. Situation: the shock, the peak shortfall in kbpd, and the most "
+        "exposed refineries from refineryDemand.\n"
+        "2. Recommendation: the drawdown posture, the uncovered shortfall, and "
+        "which alternate crude to pre-position.\n"
+        "3. Trade-off: covering more of the shock now versus preserving cover, "
+        "citing the trough and projected cover days.\n"
+        "4. Replenishment: when to refill (the window) and the residual risk.\n\n"
+        "Cite the plan's own figures. Be declarative. Volumes are in million "
+        "barrels (Mbbl)."
+    )
+
+
 __all__ = [
     "SYSTEM_ANALYST",
     "build_cascade_prompt",
@@ -426,4 +454,5 @@ __all__ = [
     "build_recommendation_prompt",
     "build_risk_summary_prompt",
     "build_scenario_narrative_prompt",
+    "build_spr_brief_prompt",
 ]

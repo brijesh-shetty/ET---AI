@@ -1279,7 +1279,7 @@ async def sourcing_substitutes(commodity: str) -> dict:
     }
 
 
-DAILY_CONSUMPTION_KBPD = 4800.0  # crude throughput basis used to size a shortfall
+MMTPA_TO_KBPD = 20.08  # 1 MMTPA crude ≈ 20.08 kbpd (≈7.33 bbl/tonne)
 
 # Each cavern's market orientation, used to skew per-site drawdown under a bias.
 _SPR_SITES = [
@@ -1289,35 +1289,114 @@ _SPR_SITES = [
 ]
 
 
-def _spr_gap_curve(horizon: int, scenario_id: str | None, intensity: float) -> tuple[list[float], float, str]:
-    """Build the daily crude supply-gap curve (kbpd) that the SPR must cover.
+def _refinery_demand_curves(disrupted_corridor: str | None) -> tuple[list[dict], float, float]:
+    """Build per-refinery crude demand (kbpd) and corridor exposure.
 
-    Driven by the selected scenario when given: the peak shortfall scales with
-    the scenario's at-risk crude volume share and the shock intensity. Falls
-    back to a generic 21-day shortfall when no scenario is selected.
+    Demand is derived from each refinery's nameplate capacity; corridor exposure
+    is inferred from the crude slate — sour/heavy grades imply Gulf (Hormuz)
+    sourcing. Returns (refineries, total_demand_kbpd, total_exposure_kbpd).
+    """
+    refs = _load_fixture("refineries.json") or []
+    corridor = disrupted_corridor or "hormuz"
+    out: list[dict] = []
+    total_demand = 0.0
+    total_exposure = 0.0
+    for r in refs:
+        if not isinstance(r, dict):
+            continue
+        cap = float(r.get("capacity_mmtpa", 0) or 0)
+        demand = cap * MMTPA_TO_KBPD
+        grades = [str(g).lower() for g in r.get("primary_crude_grades", [])]
+        gulf = sum(1 for g in grades if ("sour" in g or "heavy" in g))
+        gulf_exposure = (gulf / len(grades)) if grades else 0.5
+        if corridor == "hormuz":
+            exposure_frac = gulf_exposure
+        elif corridor in ("bab_el_mandeb", "suez", "cape_of_good_hope"):
+            exposure_frac = gulf_exposure * 0.4
+        else:
+            exposure_frac = 0.1
+        exposure_kbpd = demand * exposure_frac
+        total_demand += demand
+        total_exposure += exposure_kbpd
+        out.append({
+            "name": r.get("name"),
+            "operator": r.get("operator"),
+            "capacityMmtpa": round(cap, 1),
+            "dailyDemandKbpd": round(demand, 1),
+            "gulfExposurePct": round(gulf_exposure * 100, 0),
+            "exposureKbpd": round(exposure_kbpd, 1),
+            "grades": r.get("primary_crude_grades", []),
+        })
+    out.sort(key=lambda x: x["exposureKbpd"], reverse=True)
+    return out, round(total_demand, 1), round(total_exposure, 1)
+
+
+def _spr_gap_forecast(
+    horizon: int,
+    scenario_id: str | None,
+    intensity: float,
+    exposure_kbpd: float,
+) -> tuple[list[float], list[dict], float, str]:
+    """Forecast the daily crude supply gap (kbpd) with an uncertainty band.
+
+    The central path scales the refinery exposure by intensity over a ramped
+    plateau-then-decay shock. The band is a parametric cone that widens with the
+    horizon (a planning uncertainty estimate, not a statistical model).
     """
     shock_days = min(21, max(7, horizon // 3))
+    crude_relevant = True
     if scenario_id and scenario_id in SCENARIOS:
-        p = getattr(SCENARIOS[scenario_id], "params", {}) or {}
-        share = p.get("crude_volume_share")
-        if share is None:
-            cut_mbd = p.get("global_cut_mbd_at_full")
-            share = (float(cut_mbd) * 1000.0 / DAILY_CONSUMPTION_KBPD) if cut_mbd else 0.0
-        peak = DAILY_CONSUMPTION_KBPD * float(share) * max(0.0, min(1.0, intensity))
+        crude_relevant = _scenario_commodity(scenario_id) in ("crude_oil",)
+        peak = exposure_kbpd * max(0.0, min(1.0, intensity)) if crude_relevant else 0.0
         label = f"{_humanize(scenario_id)} ({intensity:.0%} intensity)"
     else:
-        peak = 2000.0
-        label = "Generic 21-day crude shortfall"
+        peak = exposure_kbpd * 0.5
+        label = "Generic crude shortfall"
 
-    curve: list[float] = []
+    central: list[float] = []
+    forecast: list[dict] = []
     for d in range(horizon):
         if d < shock_days:
-            curve.append(round(peak, 1))
+            base = peak
         elif d < 2 * shock_days:
-            curve.append(round(peak * 0.4, 1))
+            base = peak * 0.4
         else:
-            curve.append(0.0)
-    return curve, round(peak, 1), label
+            base = 0.0
+        unc = base * (0.15 + 0.012 * d) if base > 0 else 0.0
+        central.append(round(base, 1))
+        forecast.append({
+            "day": d,
+            "central": round(base, 1),
+            "low": round(max(0.0, base - unc), 1),
+            "high": round(base + unc, 1),
+        })
+    return central, forecast, round(peak, 1), label
+
+
+def _replenishment_windows(central_gap: list[float], horizon: int) -> tuple[list[dict], list[bool]]:
+    """Identify replenishment windows: contiguous post-shock days with no gap,
+    when crude can be bought back to refill the reserve at eased prices."""
+    prices = _load_fixture("commodity_prices.json") or {}
+    brent_series = prices.get("brent_crude_usd", []) if isinstance(prices, dict) else []
+    last_brent = float(brent_series[-1].get("value", BASE_BRENT)) if brent_series else BASE_BRENT
+    eased_price = round(last_brent * 0.95, 2)
+
+    allowed = [g <= 0.0 for g in central_gap]
+    windows: list[dict] = []
+    start: int | None = None
+    for d in range(horizon):
+        if allowed[d] and start is None:
+            start = d
+        elif not allowed[d] and start is not None:
+            windows.append({"startDay": start, "endDay": d - 1, "days": d - start,
+                            "estPriceUsd": eased_price,
+                            "reason": "Supply gap cleared; refill at eased spot/contract prices."})
+            start = None
+    if start is not None:
+        windows.append({"startDay": start, "endDay": horizon - 1, "days": horizon - start,
+                        "estPriceUsd": eased_price,
+                        "reason": "Supply gap cleared; refill at eased spot/contract prices."})
+    return windows, allowed
 
 
 def _build_spr_plan(
@@ -1336,21 +1415,30 @@ def _build_spr_plan(
     import_mmb_day = current_fill / BASE_SPR_DAYS if BASE_SPR_DAYS else 3.2
     reserve_floor = round(target_cover_days * import_mmb_day, 3)
 
-    gap_curve, peak_gap, scenario_label = _spr_gap_curve(horizon, scenario_id, intensity)
+    scenario_corridor = _scenario_corridor(scenario_id) if scenario_id else "hormuz"
+    refineries, total_demand_kbpd, exposure_kbpd = _refinery_demand_curves(scenario_corridor)
+    gap_curve, gap_forecast, peak_gap, scenario_label = _spr_gap_forecast(
+        horizon, scenario_id, intensity, exposure_kbpd
+    )
+    windows, replenish_allowed = _replenishment_windows(gap_curve, horizon)
 
     config = spr_engine.SPRConfig(
         starting_reserve_mmb=round(current_fill, 3),
         max_daily_drawdown_kbpd=600.0,
         max_daily_replenish_kbpd=300.0,
-        daily_consumption_kbpd=DAILY_CONSUMPTION_KBPD,
+        daily_consumption_kbpd=total_demand_kbpd or 4800.0,
         supply_gap_curve=gap_curve,
         planning_horizon_days=horizon,
         reserve_floor_mmb=reserve_floor,
-        # Unmet shortfall is weighted in kbpd; the floor slack is in MMb (a 1000x
+        # Unmet shortfall is weighted in kbpd; the floor slack is in Mbbl (a 1000x
         # smaller scale). Scale the penalty past that conversion so the floor acts
         # as a near-hard drawdown limit: a higher target cover preserves reserve
         # at the cost of leaving more of the shortfall uncovered.
         floor_penalty_coef=1500.0,
+        capacity_mmb=round(total_capacity, 3),
+        replenish_allowed=replenish_allowed,
+        # Only reward rebuilding when there is an actual shock to recover from.
+        rebuild_reward_coef=80.0 if peak_gap > 1.0 else 0.0,
     )
     try:
         plan = spr_engine.solve_spr_plan(config)
@@ -1360,25 +1448,32 @@ def _build_spr_plan(
     release_schedule: list[dict] = []
     gap_closed_pct = 0.0
     total_unmet_mb = 0.0
+    total_replenish_mb = 0.0
     projected_cover_days = round(current_fill / import_mmb_day, 1)
+    min_reserve = current_fill
     avg_active_draw = 0.0
     solver_status = "unavailable"
 
     if plan is not None:
         solver_status = getattr(plan, "status", "unknown")
         drawdown_kbpd = getattr(plan, "drawdown_kbpd", [])
+        replenish_kbpd = getattr(plan, "replenish_kbpd", [])
         reserve_series = getattr(plan, "reserve_mmb", [])
         cumulative = 0.0
         active_draws: list[float] = []
         for i in range(horizon):
             draw = float(drawdown_kbpd[i]) / 1000.0 if i < len(drawdown_kbpd) else 0.0
+            refill = float(replenish_kbpd[i]) / 1000.0 if i < len(replenish_kbpd) else 0.0
             cumulative += draw
+            total_replenish_mb += refill
             if draw > 1e-4:
                 active_draws.append(draw)
             release_schedule.append({
                 "day": i,
                 "drawMb": round(draw, 3),
+                "replenishMb": round(refill, 3),
                 "cumulativeMb": round(cumulative, 3),
+                "reserveMb": round(float(reserve_series[i]), 3) if i < len(reserve_series) else None,
                 "targetMarket": bias,
             })
         avg_active_draw = sum(active_draws) / len(active_draws) if active_draws else 0.0
@@ -1395,15 +1490,18 @@ def _build_spr_plan(
 
         if reserve_series:
             projected_cover_days = round(float(reserve_series[-1]) / import_mmb_day, 1)
+            min_reserve = min(float(v) for v in reserve_series)
 
+        trough_cover = round(min_reserve / import_mmb_day, 1)
         rationale = (
             f"LP minimises price-impact-weighted unmet crude shortfall over {horizon} days "
-            f"against the {scenario_label} shock (peak {peak_gap:.0f} kbpd), subject to "
-            f"reserve balance, 600/300 kbpd draw/replenish limits, and a soft floor of "
-            f"{reserve_floor:.1f} MB (~{target_cover_days:.0f} days cover). It closes "
-            f"{gap_closed_pct:.0f}% of the no-action price impact, leaving {total_unmet_mb:.1f} MB "
-            f"of shortfall uncovered, and ends the window at {projected_cover_days:.1f} days of "
-            f"cover. Allocation biased {bias}. Solver status: {solver_status}."
+            f"against the {scenario_label} shock (peak {peak_gap:.0f} kbpd of refinery demand), "
+            f"subject to reserve balance, 600/300 kbpd draw/replenish limits, a {total_capacity:.1f} "
+            f"Mbbl tank ceiling, and a soft floor of {reserve_floor:.1f} Mbbl (~{target_cover_days:.0f} "
+            f"days cover). It closes {gap_closed_pct:.0f}% of the no-action price impact, leaves "
+            f"{total_unmet_mb:.1f} Mbbl of shortfall uncovered, draws cover to a {trough_cover:.1f}-day "
+            f"trough, then refills {total_replenish_mb:.1f} Mbbl in the post-shock window to end at "
+            f"{projected_cover_days:.1f} days. Allocation biased {bias}. Solver status: {solver_status}."
         )
     else:
         for d in range(horizon):
@@ -1412,7 +1510,9 @@ def _build_spr_plan(
             release_schedule.append({
                 "day": d,
                 "drawMb": draw,
+                "replenishMb": 0.0,
                 "cumulativeMb": round(cum, 3),
+                "reserveMb": None,
                 "targetMarket": bias,
             })
         avg_active_draw = 0.85
@@ -1440,16 +1540,110 @@ def _build_spr_plan(
         "currentFillMb": round(current_fill, 2),
         "coverDays": round(current_fill / import_mmb_day, 1),
         "projectedCoverDays": projected_cover_days,
+        "troughCoverDays": round(min_reserve / import_mmb_day, 1),
         "gapClosedPct": gap_closed_pct,
         "peakGapKbpd": peak_gap,
         "totalUnmetMb": total_unmet_mb,
+        "totalReplenishMb": round(total_replenish_mb, 2),
+        "totalDemandKbpd": total_demand_kbpd,
         "scenarioId": scenario_id,
         "scenarioLabel": scenario_label,
         "targetCoverDays": round(target_cover_days, 1),
         "marketBias": bias,
         "sites": sites,
+        "refineryDemand": refineries,
+        "gapForecast": gap_forecast,
+        "replenishmentWindows": windows,
         "releaseSchedule": release_schedule,
         "rationale": rationale,
+    }
+
+
+def _spr_urgency(plan: dict) -> str:
+    peak = float(plan.get("peakGapKbpd", 0))
+    trough = float(plan.get("troughCoverDays", plan.get("coverDays", 9.5)))
+    if peak <= 1.0:
+        return "low"
+    if trough < 4 or peak > 2000:
+        return "high"
+    if trough < 6 or peak > 800:
+        return "elevated"
+    return "low"
+
+
+def _local_spr_brief(plan: dict) -> dict:
+    """Deterministic decision brief composed from the LP plan (fixture mode)."""
+    urgency = _spr_urgency(plan)
+    label = plan.get("scenarioLabel", "the current shock")
+    peak = float(plan.get("peakGapKbpd", 0))
+    gap_closed = float(plan.get("gapClosedPct", 0))
+    trough = float(plan.get("troughCoverDays", plan.get("coverDays", 0)))
+    proj = float(plan.get("projectedCoverDays", 0))
+    unmet = float(plan.get("totalUnmetMb", 0))
+    refills = float(plan.get("totalReplenishMb", 0))
+    bias = plan.get("marketBias", "balanced")
+    refineries = plan.get("refineryDemand", []) or []
+    windows = plan.get("replenishmentWindows", []) or []
+    top_exposed = [r["name"] for r in refineries[:3] if r.get("exposureKbpd", 0) > 0]
+
+    if peak <= 1.0:
+        situation = (
+            f"{label} produces no material crude shortfall, so the SPR is not the right lever here. "
+            "Hold reserves and monitor; act on the sourcing and demand-side levers instead."
+        )
+    else:
+        situation = (
+            f"{label} opens a crude supply gap peaking at {peak:.0f} kbpd. Most exposed refineries: "
+            f"{', '.join(top_exposed) if top_exposed else 'n/a'}. The optimised drawdown closes "
+            f"{gap_closed:.0f}% of the no-action price impact but draws cover to a {trough:.1f}-day "
+            f"trough — {unmet:.1f} Mbbl of shortfall stays uncovered."
+        )
+
+    win_txt = (
+        f"day {windows[0]['startDay']}-{windows[0]['endDay']} (~${windows[0]['estPriceUsd']:.0f}/bbl)"
+        if windows else "no clear window in horizon"
+    )
+
+    actions = []
+    if peak > 1.0:
+        actions.append(
+            f"Authorise drawdown front-loaded to the early shock window, biased {bias}; "
+            f"protect the {trough:.1f}-day reserve floor."
+        )
+        actions.append(
+            f"Pre-position non-Gulf cargoes (Russian ESPO/Urals, US WTI) to cover the {unmet:.1f} Mbbl "
+            "the reserve cannot bridge."
+        )
+        actions.append(f"Schedule refill of {refills:.1f} Mbbl in the replenishment window: {win_txt}.")
+    else:
+        actions.append("No SPR drawdown required; keep reserves at current cover.")
+
+    tradeoffs = [
+        f"Aggressive draw covers more of the shock now but leaves cover at {trough:.1f} days; a higher "
+        f"target rebuilds to {proj:.1f} days but absorbs less of the shortfall.",
+        "Earlier refill locks in current prices; waiting for a deeper price dip risks a second shock.",
+    ]
+    risks = [
+        "Refinery exposure assumes Gulf sourcing for sour/heavy slates; actual cargo origin may differ.",
+        "Replenishment window assumes the shock does not recur; a second event reopens the gap.",
+    ]
+    watch = [
+        "Hormuz transit counts and war-risk insurance quotes.",
+        "Brent spot vs the refill trigger price.",
+        f"Reserve trough vs the {plan.get('targetCoverDays', 6):.0f}-day target floor.",
+    ]
+
+    return {
+        "urgency": urgency,
+        "headline": (
+            f"{label}: {urgency.upper()} — cover {trough:.1f}d trough, {gap_closed:.0f}% impact closed"
+            if peak > 1.0 else f"{label}: SPR action not required"
+        ),
+        "situation": situation,
+        "actions": actions,
+        "tradeoffs": tradeoffs,
+        "risks": risks,
+        "watchItems": watch,
     }
 
 
@@ -1458,9 +1652,7 @@ async def get_spr_plan() -> dict:
     return _build_spr_plan()
 
 
-@router.post("/spr/plan")
-async def post_spr_plan(body: dict | None = None) -> dict:
-    body = body or {}
+def _spr_params_from_body(body: dict) -> dict:
     horizon = int(body.get("horizonDays", 60))
     target = float(body.get("targetCoverDays", 6.0))
     bias = str(body.get("marketBias", "balanced"))
@@ -1468,13 +1660,68 @@ async def post_spr_plan(body: dict | None = None) -> dict:
     intensity = float(body.get("intensity", body.get("shockSeverity", 0.5)))
     if scenario_id is not None and scenario_id not in SCENARIOS:
         raise HTTPException(status_code=404, detail=f"Unknown scenario: {scenario_id}")
-    return _build_spr_plan(
-        horizon=horizon,
-        target_cover_days=target,
-        bias=bias,
-        scenario_id=scenario_id,
-        intensity=intensity,
+    return {
+        "horizon": horizon,
+        "target_cover_days": target,
+        "bias": bias,
+        "scenario_id": scenario_id,
+        "intensity": intensity,
+    }
+
+
+@router.post("/spr/plan")
+async def post_spr_plan(body: dict | None = None) -> dict:
+    return _build_spr_plan(**_spr_params_from_body(body or {}))
+
+
+@router.post("/spr/brief")
+async def spr_brief(body: dict | None = None) -> dict:
+    """Strategic Reserve decision-support brief — the agent layer over the LP.
+
+    Solves the plan for the requested parameters, then returns a structured
+    policymaker brief (situation, actions, trade-offs, risks, watch-items) plus
+    an LLM narrative when live, falling back to a deterministic local brief.
+    """
+    params = _spr_params_from_body(body or {})
+    plan = _build_spr_plan(**params)
+    brief = _local_spr_brief(plan)
+
+    settings = get_settings()
+    live = bool(getattr(settings, "allow_live_ingest", False)) and bool(
+        getattr(settings, "gemini_api_key", None)
     )
+    narrative = ""
+    if live:
+        try:
+            from app.llm.summarise import LLMClient  # type: ignore
+
+            client = LLMClient(settings)
+            narrative = await client.spr_brief(plan) or ""
+        except Exception:
+            narrative = ""
+        if narrative.strip().startswith("[fixture"):
+            narrative = ""
+    if not narrative.strip():
+        fixtures = _load_fixture("llm_responses.json") or {}
+        narrative = fixtures.get("spr_brief") or (
+            f"{brief['situation']} Recommended: {brief['actions'][0]}"
+        )
+
+    return {
+        "scenarioId": plan.get("scenarioId"),
+        "scenarioLabel": plan.get("scenarioLabel"),
+        "narrative": narrative,
+        **brief,
+        "plan": {
+            "coverDays": plan.get("coverDays"),
+            "troughCoverDays": plan.get("troughCoverDays"),
+            "projectedCoverDays": plan.get("projectedCoverDays"),
+            "gapClosedPct": plan.get("gapClosedPct"),
+            "peakGapKbpd": plan.get("peakGapKbpd"),
+            "totalUnmetMb": plan.get("totalUnmetMb"),
+        },
+        "generatedAt": _now_iso(),
+    }
 
 
 _FABRICATED_HOSTS = (
