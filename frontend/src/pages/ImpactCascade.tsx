@@ -28,8 +28,16 @@ function severityBg(s: number): string {
   return 'rgba(16,185,129,0.10)';
 }
 
+function fmtPrice(v: number): string {
+  if (v >= 1000) return v.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  if (v >= 10) return v.toFixed(1);
+  return v.toFixed(2);
+}
+
 function NodeChip({ node, showLag }: { node: CascadeImpactNode; showLag?: boolean }) {
   const color = severityColor(node.severity);
+  const m = node.metric;
+  const downGood = m?.direction === 'down';
   return (
     <div
       className="rounded-md border px-3 py-2"
@@ -38,10 +46,24 @@ function NodeChip({ node, showLag }: { node: CascadeImpactNode; showLag?: boolea
     >
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs text-slate-100">{node.label}</span>
-        <span className="font-mono text-[10px] tabular-nums" style={{ color }}>
-          {(node.severity * 100).toFixed(0)}
-        </span>
+        {m ? (
+          <span className="font-mono text-[10px] tabular-nums font-semibold" style={{ color }}>
+            {m.deltaLabel}
+          </span>
+        ) : (
+          <span className="font-mono text-[10px] tabular-nums" style={{ color }}>
+            {(node.severity * 100).toFixed(0)}
+          </span>
+        )}
       </div>
+      {m && (
+        <div className="mt-1 flex items-baseline gap-1.5 font-mono text-[11px] tabular-nums">
+          <span className="text-slate-400">{fmtPrice(m.current)}</span>
+          <span className="text-slate-600">→</span>
+          <span style={{ color: downGood ? '#fbbf24' : color }}>{fmtPrice(m.projected)}</span>
+          <span className="text-[9px] text-slate-500">{m.unit}</span>
+        </div>
+      )}
       <div className="mt-1.5 h-[3px] w-full overflow-hidden rounded-sm bg-slate-800">
         <div className="h-full" style={{ width: `${node.severity * 100}%`, background: color }} />
       </div>
@@ -228,18 +250,18 @@ export default function ImpactCascade() {
               </div>
               <Column
                 title="Commodities hit"
-                subtitle="direct import exposure"
+                subtitle="current → projected price"
                 nodes={result.affectedCommodities}
               />
               <Column
                 title="Indian sectors"
-                subtitle="downstream industry"
+                subtitle="current → projected (Rs)"
                 nodes={result.sectorImpacts}
                 showLag
               />
               <Column
                 title="Macro variables"
-                subtitle="economy-wide"
+                subtitle="CPI · INR · GDP · fiscal"
                 nodes={result.macroImpacts}
                 showLag
               />

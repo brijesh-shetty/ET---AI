@@ -61,6 +61,28 @@ export function getScoresByCorridor(corridor: Corridor): Promise<RiskScore[]> {
   });
 }
 
+export interface SupplierScore {
+  country: string;
+  sharePct: number;
+  corridor: Corridor;
+  corridorScore: number;
+  supplierRisk: number;
+  tier: 'low' | 'elevated' | 'high' | 'critical';
+}
+
+export interface SupplierScoresResponse {
+  commodity: string;
+  suppliers: SupplierScore[];
+  asOf: string;
+}
+
+export function getSupplierScores(commodity: string): Promise<SupplierScoresResponse> {
+  return request<SupplierScoresResponse>({
+    method: 'GET',
+    url: `/scores/suppliers/${encodeURIComponent(commodity)}`,
+  });
+}
+
 export interface ScenarioListItem {
   scenarioId: string;
   name: string;
@@ -119,6 +141,51 @@ export function runScenario(req: ScenarioRequest): Promise<ScenarioResult> {
   });
 }
 
+export interface TwinRefinery {
+  name: string;
+  operator: string;
+  capacityMmtpa: number;
+  lat: number;
+  lon: number;
+  grades: string[];
+}
+
+export interface TwinLngTerminal {
+  name: string;
+  operator: string;
+  capacityMtpa: number;
+  utilizationPct: number;
+  status: string;
+  lat: number;
+  lon: number;
+}
+
+export interface TwinPort {
+  name: string;
+  lat: number;
+  lon: number;
+  type: string;
+}
+
+export interface TwinSource {
+  id: string;
+  label: string;
+  lat: number;
+  lon: number;
+  commodity: string;
+}
+
+export interface TwinSupplyRoute {
+  id: string;
+  commodity: string;
+  sourceLabel: string;
+  destLabel: string;
+  corridor: Corridor;
+  status: 'open' | 'congested' | 'disrupted' | 'closed';
+  sharePct: number;
+  path: Array<[number, number]>;
+}
+
 export interface TwinState {
   asOf: string;
   corridors: Array<{
@@ -130,6 +197,11 @@ export interface TwinState {
   }>;
   vessels: number;
   storage: { sprFillPct: number; lngTerminalFillPct: number };
+  refineries?: TwinRefinery[];
+  lngTerminals?: TwinLngTerminal[];
+  ports?: TwinPort[];
+  sources?: TwinSource[];
+  supplyRoutes?: TwinSupplyRoute[];
 }
 
 export function getTwinState(): Promise<TwinState> {
@@ -305,6 +377,21 @@ export interface CascadeCause {
   description: string;
 }
 
+export interface CascadePrice {
+  currentPrice: number;
+  projectedPrice: number;
+  priceUpliftPct: number;
+  unit: string;
+}
+
+export interface CascadeMetric {
+  current: number;
+  projected: number;
+  unit: string;
+  deltaLabel: string;
+  direction: 'up' | 'down';
+}
+
 export interface CascadeImpactNode {
   id: string;
   label: string;
@@ -314,6 +401,8 @@ export interface CascadeImpactNode {
   via: string[];
   path: string[];
   lagDays: number;
+  price?: CascadePrice;
+  metric?: CascadeMetric;
 }
 
 export interface CascadeEdge {

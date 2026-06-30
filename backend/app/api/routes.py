@@ -227,31 +227,120 @@ async def healthz() -> dict:
     }
 
 
+# Maps frontend commodity codes to the relevance-matrix keys + a per-corridor
+# exposure factor for commodities not in the matrix.
+_COMMODITY_RELEVANCE_KEY = {
+    "crude_oil": "crude",
+    "lng": "lng",
+    "lpg": "lpg",
+    "coking_coal": "coking_coal",
+    "rare_earths": "rare_earth",
+    "solar_pv": "solar_pv",
+    "uranium": "uranium",
+    "lithium": "lithium",
+    "nickel": "nickel",
+    "cobalt": "nickel",
+}
+
+_SCORE_PAIRS = [
+    ("hormuz", "crude_oil"),
+    ("hormuz", "lng"),
+    ("hormuz", "lpg"),
+    ("bab_el_mandeb", "crude_oil"),
+    ("bab_el_mandeb", "lng"),
+    ("malacca", "coking_coal"),
+    ("malacca", "nickel"),
+    ("malacca", "cobalt"),
+    ("malacca", "uranium"),
+    ("south_china_sea", "rare_earths"),
+    ("south_china_sea", "solar_pv"),
+    ("south_china_sea", "lithium"),
+    ("cape_of_good_hope", "crude_oil"),
+    ("suez", "crude_oil"),
+]
+
+
+def _live_score_dict(corridor: str, commodity: str, sig: dict, drivers: list[str]) -> dict:
+    """Build a per-corridor-x-commodity score dict from live corridor signals."""
+    from app.engines.risk_score import CORRIDOR_COMMODITY_RELEVANCE, tier_from_score
+
+    rel_key = _COMMODITY_RELEVANCE_KEY.get(commodity, commodity)
+    relevance = CORRIDOR_COMMODITY_RELEVANCE.get(corridor, {}).get(rel_key, 0.5)
+    base_score = float(sig.get("score", 0.0))
+    score = round(base_score * relevance, 1)
+    s = sig.get("signals", {})
+    return {
+        "corridor": corridor,
+        "commodity": commodity,
+        "score": score,
+        "tier": tier_from_score(score),
+        "components": {
+            "geopolitical": round(s.get("geo", 0.0) * 100, 1),
+            "chokepoint": round(s.get("ais", 0.0) * 100, 1),
+            "weather": 0.0,
+            "market": round(s.get("price_vol", 0.0) * 100, 1),
+            "sanctions": round(s.get("sanctions", 0.0) * 100, 1),
+        },
+        "drivers": drivers,
+        "confidence": 0.82,
+        "relevance": round(relevance, 2),
+        "asOf": _now_iso(),
+    }
+
+
 @router.get("/scores")
 async def get_scores(commodity: str | None = Query(default=None)) -> list[dict]:
-    pairs = [
-        ("hormuz", "crude_oil"),
-        ("hormuz", "lng"),
-        ("hormuz", "lpg"),
-        ("bab_el_mandeb", "crude_oil"),
-        ("bab_el_mandeb", "lng"),
-        ("malacca", "coking_coal"),
-        ("malacca", "nickel"),
-        ("malacca", "cobalt"),
-        ("malacca", "uranium"),
-        ("south_china_sea", "rare_earths"),
-        ("south_china_sea", "solar_pv"),
-        ("south_china_sea", "lithium"),
-        ("cape_of_good_hope", "crude_oil"),
-        ("suez", "crude_oil"),
-    ]
+    """Live per-corridor x commodity risk scores computed from real signals.
+
+    Scores are derived from GDELT events, vessel positions, sanctions, and
+    price volatility — not hardcoded. Falls back to the seeded baseline only
+    if the live signal computation fails entirely.
+    """
+    pairs = _SCORE_PAIRS
     if commodity:
         pairs = [(c, k) for (c, k) in pairs if k == commodity]
-    out: list[dict] = []
-    for corridor, comm in pairs:
-        score = _seeded_score(corridor, comm)
-        out.append(_risk_score_dict(corridor, comm, score))
-    return out
+
+    try:
+        from app.engines import live_scores
+
+        sig = await live_scores.compute_live_corridor_signals()
+        drivers_cache = {
+            c: live_scores.drivers_from_signals(c, sig[c]) for c in sig
+        }
+        out: list[dict] = []
+        for corridor, comm in pairs:
+            csig = sig.get(corridor)
+            if not csig:
+                out.append(_risk_score_dict(corridor, comm, _seeded_score(corridor, comm)))
+                continue
+            out.append(_live_score_dict(corridor, comm, csig, drivers_cache.get(corridor, [])))
+        return out
+    except Exception:  # noqa: BLE001 — never let scoring crash the dashboard
+        return [
+            _risk_score_dict(corridor, comm, _seeded_score(corridor, comm))
+            for corridor, comm in pairs
+        ]
+
+
+@router.get("/scores/suppliers/{commodity}")
+async def get_supplier_scores(commodity: str) -> dict:
+    """Per-supplier-country risk for a commodity (the 'by supplier' dimension).
+
+    Blends each supplier's primary-corridor live risk with its import-share
+    concentration, so a high-share single supplier reads as a risk itself.
+    """
+    try:
+        from app.engines import live_scores
+
+        sig = await live_scores.compute_live_corridor_signals()
+        suppliers = await live_scores.supplier_scores(commodity, sig)
+        return {
+            "commodity": commodity,
+            "suppliers": suppliers,
+            "asOf": _now_iso(),
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/scores/{corridor}")
@@ -498,6 +587,8 @@ async def twin_state() -> dict:
             "status": corridor_status[corridor],
         })
 
+    network = _india_supply_network(corridor_status)
+
     return {
         "asOf": _now_iso(),
         "corridors": corridors_out,
@@ -507,6 +598,128 @@ async def twin_state() -> dict:
             "lngTerminalFillPct": 64.2,
         },
         "sanctionAlerts": _compute_sanction_alerts(),
+        "refineries": network["refineries"],
+        "lngTerminals": network["lngTerminals"],
+        "ports": network["ports"],
+        "sources": network["sources"],
+        "supplyRoutes": network["supplyRoutes"],
+    }
+
+
+# Corridor waypoints — the geographic chokepoint each supply route threads through.
+_CORRIDOR_WAYPOINT: dict[str, list[float]] = {
+    "hormuz": [26.5, 56.2],
+    "bab_el_mandeb": [12.6, 43.4],
+    "malacca": [2.5, 101.5],
+    "south_china_sea": [12.0, 115.0],
+    "cape_of_good_hope": [-34.3, 18.4],
+    "suez": [30.0, 32.5],
+}
+
+# Major foreign export sources (wellhead / mine / fab) feeding India.
+_SUPPLY_SOURCES: list[dict] = [
+    {"id": "gulf", "label": "Persian Gulf wellheads", "lat": 27.0, "lon": 51.0, "commodity": "crude_oil"},
+    {"id": "qatar", "label": "Qatar (Ras Laffan LNG)", "lat": 25.9, "lon": 51.6, "commodity": "lng"},
+    {"id": "russia", "label": "Russia (Urals/ESPO)", "lat": 56.0, "lon": 38.0, "commodity": "crude_oil"},
+    {"id": "us_gulf", "label": "US Gulf Coast", "lat": 29.3, "lon": -94.8, "commodity": "crude_oil"},
+    {"id": "queensland", "label": "Queensland coal", "lat": -22.0, "lon": 148.0, "commodity": "coking_coal"},
+    {"id": "indonesia", "label": "Indonesia (nickel/coal)", "lat": -2.5, "lon": 120.0, "commodity": "nickel"},
+    {"id": "china_fab", "label": "China (solar/REE)", "lat": 31.0, "lon": 121.0, "commodity": "solar_pv"},
+]
+
+# Major Indian energy ports (entry + distribution nodes).
+_INDIA_PORTS: list[dict] = [
+    {"name": "Vadinar", "lat": 22.28, "lon": 69.72, "type": "crude oil terminal"},
+    {"name": "Sikka", "lat": 22.43, "lon": 69.84, "type": "crude oil terminal"},
+    {"name": "Mundra", "lat": 22.84, "lon": 69.53, "type": "multi-cargo"},
+    {"name": "Paradip", "lat": 20.27, "lon": 86.67, "type": "crude + coal"},
+    {"name": "Visakhapatnam", "lat": 17.69, "lon": 83.22, "type": "crude + coal + SPR"},
+    {"name": "Ennore", "lat": 13.25, "lon": 80.32, "type": "LNG + coal"},
+    {"name": "Dhamra", "lat": 20.78, "lon": 86.95, "type": "coking coal"},
+]
+
+
+def _india_supply_network(corridor_status: dict[str, str]) -> dict:
+    """India's energy supply network: refineries, LNG terminals, ports, and the
+    source -> corridor -> India routes that thread through each chokepoint.
+
+    Surfaces the 'wellhead -> refinery -> distribution' picture the PS2 digital
+    twin requirement asks for, drawn from the refineries/lng_terminals fixtures
+    plus a static port + source list.
+    """
+    refineries_raw = _load_fixture("refineries.json") or []
+    terminals_raw = _load_fixture("lng_terminals.json") or []
+
+    refineries = []
+    if isinstance(refineries_raw, list):
+        for r in refineries_raw:
+            if not isinstance(r, dict):
+                continue
+            refineries.append({
+                "name": r.get("name"),
+                "operator": r.get("operator", ""),
+                "capacityMmtpa": r.get("capacity_mmtpa", r.get("capacity_MMTPA", 0)),
+                "lat": r.get("lat"),
+                "lon": r.get("lon"),
+                "grades": r.get("primary_crude_grades", []),
+            })
+
+    lng_terminals = []
+    if isinstance(terminals_raw, list):
+        for t in terminals_raw:
+            if not isinstance(t, dict):
+                continue
+            lng_terminals.append({
+                "name": t.get("name"),
+                "operator": t.get("operator", ""),
+                "capacityMtpa": t.get("capacity_mtpa", 0),
+                "utilizationPct": t.get("utilization_pct", 0),
+                "status": t.get("status", "OPERATIONAL"),
+                "lat": t.get("lat"),
+                "lon": t.get("lon"),
+            })
+
+    # Build source -> corridor -> India routes. Each route's status follows the
+    # corridor it threads through, so a closed corridor lights its routes red.
+    india_hub = {"lat": 19.0, "lon": 72.8}  # Mumbai offshore approach as the convergence point
+    route_specs = [
+        {"source": "gulf", "corridor": "hormuz", "to": "Vadinar", "toLat": 22.28, "toLon": 69.72, "commodity": "crude_oil", "sharePct": 42},
+        {"source": "qatar", "corridor": "hormuz", "to": "Dahej", "toLat": 21.70, "toLon": 72.53, "commodity": "lng", "sharePct": 40},
+        {"source": "russia", "corridor": "suez", "to": "Sikka", "toLat": 22.43, "toLon": 69.84, "commodity": "crude_oil", "sharePct": 36},
+        {"source": "us_gulf", "corridor": "cape_of_good_hope", "to": "Mundra", "toLat": 22.84, "toLon": 69.53, "commodity": "crude_oil", "sharePct": 6},
+        {"source": "queensland", "corridor": "malacca", "to": "Paradip", "toLat": 20.27, "toLon": 86.67, "commodity": "coking_coal", "sharePct": 70},
+        {"source": "indonesia", "corridor": "malacca", "to": "Visakhapatnam", "toLat": 17.69, "toLon": 83.22, "commodity": "nickel", "sharePct": 55},
+        {"source": "china_fab", "corridor": "south_china_sea", "to": "Ennore", "toLat": 13.25, "toLon": 80.32, "commodity": "solar_pv", "sharePct": 80},
+    ]
+    source_by_id = {s["id"]: s for s in _SUPPLY_SOURCES}
+    supply_routes = []
+    for spec in route_specs:
+        src = source_by_id.get(spec["source"])
+        wp = _CORRIDOR_WAYPOINT.get(spec["corridor"])
+        if not src or not wp:
+            continue
+        status = corridor_status.get(spec["corridor"], "open")
+        supply_routes.append({
+            "id": f"{spec['source']}-{spec['to']}",
+            "commodity": spec["commodity"],
+            "sourceLabel": src["label"],
+            "destLabel": spec["to"],
+            "corridor": spec["corridor"],
+            "status": status,
+            "sharePct": spec["sharePct"],
+            "path": [
+                [src["lat"], src["lon"]],
+                wp,
+                [spec["toLat"], spec["toLon"]],
+            ],
+        })
+
+    return {
+        "refineries": refineries,
+        "lngTerminals": lng_terminals,
+        "ports": _INDIA_PORTS,
+        "sources": _SUPPLY_SOURCES,
+        "supplyRoutes": supply_routes,
     }
 
 
