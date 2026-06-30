@@ -37,7 +37,9 @@ class Settings(BaseSettings):
     api_host: str = Field(default="0.0.0.0")
     api_port: int = Field(default=8000)
 
-    data_root: str = Field(default="./data")
+    # Resolved relative to the backend package (NOT cwd) so fixtures always
+    # load whether uvicorn is launched from the repo root or backend/.
+    data_root: str = Field(default=str(_BACKEND_DIR / "data"))
 
     allow_live_ingest: bool = Field(default=False)
 
@@ -77,6 +79,28 @@ class Settings(BaseSettings):
     un_sanctions_url: str = Field(
         default="https://scsanctions.un.org/resources/xml/en/consolidated.xml"
     )
+
+    # VEDAS (ISRO Space Applications Centre) — geospatial energy infrastructure.
+    # Used to refresh refineries + crude/product/gas pipeline polylines on the
+    # digital twin. See ingest/vedas.py for the request shape.
+    vedas_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("VEDAS_API_KEY", "VEDAS_KEY"),
+    )
+    vedas_base_url: str = Field(default="https://vedas.sac.gov.in")
+
+    # Temporal RGB date windows. Defaults match the API Centre sample cURL
+    # (known-good Sep 2025 imagery). Override via env to roll forward as VEDAS
+    # publishes newer datasets. Format: YYYYMMDD (no dashes).
+    vedas_rgb_r_from: str = Field(default="20250910")
+    vedas_rgb_r_to:   str = Field(default="20250920")
+    vedas_rgb_g_from: str = Field(default="20250810")
+    vedas_rgb_g_to:   str = Field(default="20250820")
+    vedas_rgb_b_from: str = Field(default="20250710")
+    vedas_rgb_b_to:   str = Field(default="20250720")
+    # NDVI single-window mosaic — Sep 2025 default.
+    vedas_ndvi_from: str = Field(default="20250918")
+    vedas_ndvi_to:   str = Field(default="20250928")
 
     cache_ttl_seconds: int = Field(default=300)
     http_timeout_seconds: float = Field(default=20.0)

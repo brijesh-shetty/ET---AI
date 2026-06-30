@@ -1,25 +1,39 @@
 """
-Scenario modeller.
+Scenario modeller — single source of truth.
 
 Seven named scenarios cover the dominant tail risks for India's strategic
 import basket. Each scenario translates an input (intensity in [0, 1] and
-duration in days) into a deterministic projection of price uplift, GDP drag,
-and SPR/stockpile runway. The elasticities are documented in
-docs/assumptions.md; this module never returns random numbers.
+duration in days) into a deterministic projection of:
+
+  * Commodity price uplift (Brent, LNG, coking coal, plus a per-scenario
+    "primary commodity" headline)
+  * GDP drag in basis points, routed through each scenario's documented
+    mechanism (crude import bill, steel margin, EV capex, renewable capex,
+    nuclear capex, etc.)
+  * SPR / stockpile runway (days of cover)
+  * Sector trajectory deflections (refinery run-rate drop, power-sector
+    stress rise) — drives the per-day timeline the API surfaces
+
+All elasticities and transmission coefficients are documented in
+`docs/assumptions.md`. The engine NEVER returns random numbers.
+
+Previously this module exposed a separate `run_scenario()` Pydantic flow that
+diverged from what the API actually served. That dead code is gone — the only
+public entry point is `project_scenario(name, intensity, duration_days)`,
+which the API route calls directly. The returned dict is the canonical
+"impact" shape the route assembles its response from.
 """
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
-
-from app.models import ScenarioResult
 
 
 # Baseline India macro and commodity references (calendar 2025-26 averages).
-# These are static inputs to the elasticity model. See assumptions.md.
-BASELINE = {
+# These are static inputs to the elasticity model — patched live at startup
+# by `ingest/baselines.py` when an API call succeeds (Brent, LNG).
+# See docs/assumptions.md for the calibration rationale.
+BASELINE: dict[str, float] = {
     "brent_usd_bbl": 82.0,
     "ttf_eur_mwh": 34.0,
     "jkm_usd_mmbtu": 12.5,
@@ -179,6 +193,29 @@ SCENARIOS: dict[str, Scenario] = {
 }
 
 
+# Per-scenario sector-transmission profile: how a unit of shock intensity
+# propagates into India's *refining* and *power* sectors. Each value is the
+# MAX deflection at full intensity (i=1.0) before duration scaling.
+#   refinery_runrate_drop_pp : percentage points off refinery run rate (100% base)
+#   power_stress_rise        : points added to the 0-100 power-sector stress index
+# Rationale (why these differ by scenario, not just by the slider):
+#   - Only crude/LNG (refinery feedstock) shocks cut run rates. Coking coal
+#     feeds STEEL, not refineries -> 0. Rare earth / solar / uranium -> 0.
+#   - Power stress is driven by gas-for-power (LNG) and grid-fuel shortfalls.
+#     Coking coal is metallurgical, NOT thermal -> ~0 power impact. Uranium
+#     feeds nuclear (~3% of generation) behind an ~18-month fuel buffer
+#     -> small/slow.
+SCENARIO_SECTOR_TRANSMISSION: dict[str, dict[str, float]] = {
+    "hormuz_partial_closure":       {"refinery_runrate_drop_pp": 22.0, "power_stress_rise": 28.0},
+    "opec_emergency_cut":           {"refinery_runrate_drop_pp": 8.0,  "power_stress_rise": 6.0},
+    "red_sea_suspension":           {"refinery_runrate_drop_pp": 5.0,  "power_stress_rise": 8.0},
+    "australia_coking_coal":        {"refinery_runrate_drop_pp": 0.0,  "power_stress_rise": 2.0},
+    "china_rare_earth_curbs":       {"refinery_runrate_drop_pp": 0.0,  "power_stress_rise": 3.0},
+    "china_solar_export_tariff":    {"refinery_runrate_drop_pp": 0.0,  "power_stress_rise": 4.0},
+    "kazakhstan_uranium_disruption":{"refinery_runrate_drop_pp": 0.0,  "power_stress_rise": 6.0},
+}
+
+
 def _intensity(value: float) -> float:
     if value < 0.0:
         return 0.0
@@ -188,283 +225,113 @@ def _intensity(value: float) -> float:
 
 
 def _duration_factor(days: int) -> float:
-    """
-    Sublinear scaling with duration: short shocks are absorbed by inventories,
-    long shocks are partly mitigated by substitution. Saturates near 1.5x.
-    """
+    """Sublinear scaling: short shocks are absorbed by inventories, longer
+    shocks saturate as substitution kicks in. Reaches 1.0 at ~14 days, capped."""
     d = max(int(days), 1)
-    return 1.0 - 0.5 ** (d / 30.0) + 0.5  # 30-day half-life centered at 1.0
+    return min(1.0, (d / 14.0) ** 0.6)
 
 
-def _round(value: float, places: int = 2) -> float:
-    return round(float(value), places)
+def project_scenario(
+    name: str,
+    intensity: float,
+    duration_days: int,
+    *,
+    brent_baseline: float | None = None,
+    spr_baseline_days: float | None = None,
+) -> dict[str, float]:
+    """Project a named scenario's macro impact from its *documented* SCENARIOS
+    params. Returns the canonical impact dict the API route consumes:
 
+        brent_uplift_pct, lng_uplift_pct, coal_uplift_pct, primary_uplift_pct
+        gdp_bps                  (negative = drag)
+        spr_runway_days          (post-shock SPR cover)
+        refinery_drop_pp         (intensity- and duration-scaled deflection)
+        power_stress_rise        (intensity- and duration-scaled deflection)
 
-async def run_scenario(name: str, intensity: float, duration_days: int) -> ScenarioResult:
-    """
-    Project the cascading impact of a named scenario.
+    Non-oil scenarios surface a `primary_uplift_pct` headline for their own
+    commodity and still register a GDP drag via the scenario's documented
+    capex/output channel.
 
     Parameters
     ----------
-    name : str
-        Key in SCENARIOS.
-    intensity : float
-        Shock intensity in [0, 1]. 1.0 = full closure / total embargo.
-    duration_days : int
-        Disruption duration in days.
-
-    Returns
-    -------
-    ScenarioResult
-        Includes price uplifts (USD and %), GDP-bps drag, SPR / stockpile
-        runway after the shock, and a list of narrative bullets.
+    name
+        Key in SCENARIOS. Raises KeyError if unknown.
+    intensity
+        Shock severity in [0, 1]. Clipped if out of range.
+    duration_days
+        Disruption window. Must be > 0.
+    brent_baseline
+        Override the live Brent baseline. Defaults to BASELINE["brent_usd_bbl"]
+        (which `ingest/baselines.py` patches live at startup).
+    spr_baseline_days
+        Override the SPR cover days baseline. Defaults to
+        BASELINE["spr_days_cover_at_baseline"].
     """
     if name not in SCENARIOS:
-        raise ValueError(f"unknown scenario: {name}")
+        raise KeyError(f"unknown scenario: {name}")
 
     scenario = SCENARIOS[name]
+    p = scenario.params
+    dur = _duration_factor(duration_days)
     i = _intensity(intensity)
-    dur_factor = _duration_factor(duration_days)
+    gpb = p.get("gdp_bps_per_10usd_brent", 18.0)
+    brent = float(brent_baseline) if brent_baseline is not None else BASELINE["brent_usd_bbl"]
+    spr_base = float(spr_baseline_days) if spr_baseline_days is not None else BASELINE["spr_days_cover_at_baseline"]
 
-    # Yield to the event loop so callers can fan out scenarios concurrently
-    # without blocking. The math itself is pure CPU but cheap.
-    await asyncio.sleep(0)
+    brent_uplift = 0.0
+    lng_uplift = 0.0
+    coal_uplift = 0.0
+    primary_uplift = 0.0
+    gdp_bps = 0.0
 
     if name == "hormuz_partial_closure":
-        impact = _hormuz_partial_closure(scenario, i, dur_factor, duration_days)
+        brent_uplift = 100.0 * p["crude_price_elasticity"] * i * p["crude_volume_share"]
+        lng_uplift = 100.0 * p["lng_price_elasticity"] * i * p["lng_volume_share"]
     elif name == "opec_emergency_cut":
-        impact = _opec_emergency_cut(scenario, i, dur_factor, duration_days)
+        # Realised cut scales linearly with intensity; uplift via documented elasticity.
+        brent_uplift = 100.0 * p["crude_price_elasticity"] * i
     elif name == "red_sea_suspension":
-        impact = _red_sea_suspension(scenario, i, dur_factor, duration_days)
+        # Rerouting/freight-driven uplift (no physical supply loss) on crude + LNG.
+        brent_uplift = 100.0 * p["crude_price_elasticity"] * i
+        lng_uplift = 100.0 * p["lng_price_elasticity"] * i
     elif name == "australia_coking_coal":
-        impact = _australia_coking_coal(scenario, i, dur_factor, duration_days)
+        coal_uplift = 100.0 * p["coking_coal_elasticity"] * i * p["australia_share"]
     elif name == "china_rare_earth_curbs":
-        impact = _china_rare_earth_curbs(scenario, i, dur_factor, duration_days)
+        primary_uplift = 100.0 * p["ree_price_elasticity"] * i * p["china_share"]
     elif name == "china_solar_export_tariff":
-        impact = _china_solar_export_tariff(scenario, i, dur_factor, duration_days)
+        primary_uplift = 100.0 * p["module_price_elasticity"] * i * p["china_module_share"]
     elif name == "kazakhstan_uranium_disruption":
-        impact = _kazakhstan_uranium_disruption(scenario, i, dur_factor, duration_days)
-    else:  # defensive; SCENARIOS membership already checked above
-        raise ValueError(f"unhandled scenario: {name}")
+        primary_uplift = 100.0 * p["uranium_price_elasticity"] * i * p["kazakhstan_share"]
 
-    return ScenarioResult(
-        scenario=name,
-        intensity=i,
-        duration_days=duration_days,
-        primary_commodity=scenario.primary_commodity,
-        primary_corridor=scenario.primary_corridor,
-        price_impacts=impact["price_impacts"],
-        gdp_bps=impact["gdp_bps"],
-        runway_days=impact["runway_days"],
-        narrative=impact["narrative"],
-        computed_at=datetime.now(timezone.utc),
+    brent_uplift *= dur
+    lng_uplift *= dur
+    coal_uplift *= dur
+    primary_uplift *= dur
+
+    # GDP drag (negative bps) routed through each scenario's OWN channel.
+    delta_brent = brent * brent_uplift / 100.0
+    if name in ("hormuz_partial_closure", "opec_emergency_cut", "red_sea_suspension"):
+        gdp_bps = -((delta_brent / 10.0) * gpb + lng_uplift * 0.6)
+    elif name == "australia_coking_coal":
+        gdp_bps = -(coal_uplift / 10.0) * p.get("steel_output_drag_bps_per_10pct_price", 4.5)
+    elif name == "china_rare_earth_curbs":
+        gdp_bps = -p.get("gdp_bps_per_pp_ev_capex_drag", 1.2) * p.get("ev_battery_pass_through_pct", 6.0) * i * dur
+    elif name == "china_solar_export_tariff":
+        gdp_bps = -p.get("renewable_capex_drag_bps", 2.5) * i * dur
+    elif name == "kazakhstan_uranium_disruption":
+        gdp_bps = -p.get("npp_capex_drag_bps", 0.8) * i * dur
+
+    spr_runway = max(2.0, spr_base - (brent_uplift / 10.0))
+    tx = SCENARIO_SECTOR_TRANSMISSION.get(
+        name, {"refinery_runrate_drop_pp": 0.0, "power_stress_rise": 0.0}
     )
-
-
-def _hormuz_partial_closure(s: Scenario, i: float, dur_factor: float, days: int) -> dict:
-    p = s.params
-    crude_uplift_pct = 100.0 * p["crude_price_elasticity"] * i * p["crude_volume_share"] * dur_factor
-    lng_uplift_pct = 100.0 * p["lng_price_elasticity"] * i * p["lng_volume_share"] * dur_factor
-    brent_new = BASELINE["brent_usd_bbl"] * (1.0 + crude_uplift_pct / 100.0)
-    jkm_new = BASELINE["jkm_usd_mmbtu"] * (1.0 + lng_uplift_pct / 100.0)
-    delta_brent = brent_new - BASELINE["brent_usd_bbl"]
-    gdp_bps = (delta_brent / 10.0) * p["gdp_bps_per_10usd_brent"]
-
-    spr_days = BASELINE["spr_days_cover_at_baseline"] / max(p["spr_drawdown_share"] * i + 0.25, 0.25)
-
     return {
-        "price_impacts": [
-            {"commodity": "crude", "baseline": BASELINE["brent_usd_bbl"], "new": _round(brent_new), "pct": _round(crude_uplift_pct)},
-            {"commodity": "lng_jkm", "baseline": BASELINE["jkm_usd_mmbtu"], "new": _round(jkm_new), "pct": _round(lng_uplift_pct)},
-        ],
-        "gdp_bps": _round(gdp_bps),
-        "runway_days": _round(spr_days),
-        "narrative": [
-            f"Brent projected at ${brent_new:.1f}/bbl (+{crude_uplift_pct:.1f}%) for {days} days.",
-            f"JKM LNG projected at ${jkm_new:.1f}/mmbtu (+{lng_uplift_pct:.1f}%).",
-            f"Indian SPR runway compresses to ~{spr_days:.1f} days of net imports.",
-            f"GDP drag of ~{gdp_bps:.0f} bps if shock persists at intensity {i:.0%}.",
-        ],
+        "brent_uplift_pct": round(brent_uplift, 2),
+        "lng_uplift_pct": round(lng_uplift, 2),
+        "coal_uplift_pct": round(coal_uplift, 2),
+        "primary_uplift_pct": round(primary_uplift, 2),
+        "gdp_bps": round(gdp_bps, 1),
+        "spr_runway_days": round(spr_runway, 1),
+        "refinery_drop_pp": round(tx["refinery_runrate_drop_pp"] * i * dur, 2),
+        "power_stress_rise": round(tx["power_stress_rise"] * i * dur, 2),
     }
-
-
-def _opec_emergency_cut(s: Scenario, i: float, dur_factor: float, days: int) -> dict:
-    p = s.params
-    cut_mbd = p["global_cut_mbd_at_full"] * i
-    uplift_pct = 100.0 * p["crude_price_elasticity"] * (cut_mbd / 3.0) * dur_factor
-    brent_new = BASELINE["brent_usd_bbl"] * (1.0 + uplift_pct / 100.0)
-    delta_brent = brent_new - BASELINE["brent_usd_bbl"]
-    gdp_bps = (delta_brent / 10.0) * p["gdp_bps_per_10usd_brent"]
-    spr_days = BASELINE["spr_days_cover_at_baseline"] / max(p["spr_drawdown_share"] * i + 0.30, 0.30)
-
-    return {
-        "price_impacts": [
-            {"commodity": "crude", "baseline": BASELINE["brent_usd_bbl"], "new": _round(brent_new), "pct": _round(uplift_pct)},
-        ],
-        "gdp_bps": _round(gdp_bps),
-        "runway_days": _round(spr_days),
-        "narrative": [
-            f"OPEC+ withdraws ~{cut_mbd:.1f} mbd of supply for {days} days.",
-            f"Brent projected at ${brent_new:.1f}/bbl (+{uplift_pct:.1f}%).",
-            f"GDP drag of ~{gdp_bps:.0f} bps via import bill widening.",
-            f"SPR runway compresses to ~{spr_days:.1f} days.",
-        ],
-    }
-
-
-def _red_sea_suspension(s: Scenario, i: float, dur_factor: float, days: int) -> dict:
-    p = s.params
-    freight_uplift_pct = p["freight_uplift_pct_at_full"] * i * dur_factor
-    crude_uplift_pct = 100.0 * p["crude_price_elasticity"] * i * dur_factor
-    lng_uplift_pct = 100.0 * p["lng_price_elasticity"] * i * dur_factor
-    brent_new = BASELINE["brent_usd_bbl"] * (1.0 + crude_uplift_pct / 100.0)
-    jkm_new = BASELINE["jkm_usd_mmbtu"] * (1.0 + lng_uplift_pct / 100.0)
-    delta_brent = brent_new - BASELINE["brent_usd_bbl"]
-    gdp_bps = (delta_brent / 10.0) * p["gdp_bps_per_10usd_brent"] + 2.0 * (freight_uplift_pct / 100.0)
-    spr_days = BASELINE["spr_days_cover_at_baseline"] / max(p["spr_drawdown_share"] * i + 0.40, 0.40)
-
-    return {
-        "price_impacts": [
-            {"commodity": "container_freight", "baseline": 100.0, "new": _round(100.0 + freight_uplift_pct), "pct": _round(freight_uplift_pct)},
-            {"commodity": "crude", "baseline": BASELINE["brent_usd_bbl"], "new": _round(brent_new), "pct": _round(crude_uplift_pct)},
-            {"commodity": "lng_jkm", "baseline": BASELINE["jkm_usd_mmbtu"], "new": _round(jkm_new), "pct": _round(lng_uplift_pct)},
-        ],
-        "gdp_bps": _round(gdp_bps),
-        "runway_days": _round(spr_days),
-        "narrative": [
-            f"Suez transit suspended; reroute via Cape adds ~{p['cape_detour_days']} voyage days.",
-            f"Container freight index up ~{freight_uplift_pct:.0f}% above baseline.",
-            f"Brent at ${brent_new:.1f}/bbl (+{crude_uplift_pct:.1f}%), JKM at ${jkm_new:.1f}/mmbtu.",
-            f"Combined GDP drag of ~{gdp_bps:.0f} bps.",
-        ],
-    }
-
-
-def _australia_coking_coal(s: Scenario, i: float, dur_factor: float, days: int) -> dict:
-    p = s.params
-    uplift_pct = 100.0 * p["coking_coal_elasticity"] * i * p["australia_share"] * dur_factor
-    cc_new = BASELINE["coking_coal_usd_t"] * (1.0 + uplift_pct / 100.0)
-    steel_drag_bps = (uplift_pct / 10.0) * p["steel_output_drag_bps_per_10pct_price"]
-    runway = p["stockpile_days"] / max(i + 0.20, 0.20)
-
-    return {
-        "price_impacts": [
-            {"commodity": "coking_coal", "baseline": BASELINE["coking_coal_usd_t"], "new": _round(cc_new), "pct": _round(uplift_pct)},
-        ],
-        "gdp_bps": _round(steel_drag_bps),
-        "runway_days": _round(runway),
-        "narrative": [
-            f"Coking coal projected at ${cc_new:.0f}/t (+{uplift_pct:.1f}%) for {days} days.",
-            f"Steel-sector value-add drag of ~{steel_drag_bps:.0f} bps to GDP.",
-            f"Indian mill stockpiles run ~{runway:.0f} days before forced cuts.",
-            "Alternative sourcing: US Appalachian, Mozambique, Russia — all higher freight cost.",
-        ],
-    }
-
-
-def _china_rare_earth_curbs(s: Scenario, i: float, dur_factor: float, days: int) -> dict:
-    p = s.params
-    uplift_pct = 100.0 * p["ree_price_elasticity"] * i * p["china_share"] * dur_factor
-    nd_new = BASELINE["neodymium_usd_kg"] * (1.0 + uplift_pct / 100.0)
-    ev_pass_pct = p["ev_battery_pass_through_pct"] * i * dur_factor
-    gdp_bps = ev_pass_pct * p["gdp_bps_per_pp_ev_capex_drag"]
-    runway = p["stockpile_days"] / max(i + 0.30, 0.30)
-
-    return {
-        "price_impacts": [
-            {"commodity": "neodymium", "baseline": BASELINE["neodymium_usd_kg"], "new": _round(nd_new), "pct": _round(uplift_pct)},
-        ],
-        "gdp_bps": _round(gdp_bps),
-        "runway_days": _round(runway),
-        "narrative": [
-            f"Neodymium projected at ${nd_new:.0f}/kg (+{uplift_pct:.0f}%) for {days} days.",
-            f"EV battery and traction-motor pass-through ~{ev_pass_pct:.1f}%.",
-            f"Renewable + EV capex drag of ~{gdp_bps:.1f} bps.",
-            f"Domestic + non-China REE buffer ~{runway:.0f} days.",
-        ],
-    }
-
-
-def _china_solar_export_tariff(s: Scenario, i: float, dur_factor: float, days: int) -> dict:
-    p = s.params
-    uplift_pct = 100.0 * p["module_price_elasticity"] * i * p["china_module_share"] * dur_factor
-    mod_new = BASELINE["solar_module_usd_w"] * (1.0 + uplift_pct / 100.0)
-    lcoe_uplift_pct = (uplift_pct / 10.0) * p["lcoe_uplift_pct_per_10pct_module"]
-    gdp_bps = p["renewable_capex_drag_bps"] * i * dur_factor
-    runway = p["stockpile_days"] / max(i + 0.40, 0.40)
-
-    return {
-        "price_impacts": [
-            {"commodity": "solar_module", "baseline": BASELINE["solar_module_usd_w"], "new": _round(mod_new, 3), "pct": _round(uplift_pct)},
-        ],
-        "gdp_bps": _round(gdp_bps),
-        "runway_days": _round(runway),
-        "narrative": [
-            f"PV module projected at ${mod_new:.3f}/W (+{uplift_pct:.1f}%) for {days} days.",
-            f"Utility-scale solar LCOE up ~{lcoe_uplift_pct:.1f}%.",
-            f"FY renewable capex drag of ~{gdp_bps:.1f} bps to GDP.",
-            f"Module inventory buffer ~{runway:.0f} days at current build rate.",
-        ],
-    }
-
-
-def _kazakhstan_uranium_disruption(s: Scenario, i: float, dur_factor: float, days: int) -> dict:
-    p = s.params
-    uplift_pct = 100.0 * p["uranium_price_elasticity"] * i * p["kazakhstan_share"] * dur_factor
-    u_new = BASELINE["uranium_usd_lb"] * (1.0 + uplift_pct / 100.0)
-    runway = p["fuel_cycle_buffer_days"] / max(i + 0.50, 0.50)
-    gdp_bps = p["npp_capex_drag_bps"] * i * dur_factor
-
-    return {
-        "price_impacts": [
-            {"commodity": "uranium_u3o8", "baseline": BASELINE["uranium_usd_lb"], "new": _round(u_new), "pct": _round(uplift_pct)},
-        ],
-        "gdp_bps": _round(gdp_bps),
-        "runway_days": _round(runway),
-        "narrative": [
-            f"U3O8 projected at ${u_new:.0f}/lb (+{uplift_pct:.0f}%) for {days} days.",
-            f"Indian fuel-cycle buffer ~{runway:.0f} days — no immediate generation risk.",
-            f"NPP build pipeline capex drag ~{gdp_bps:.1f} bps.",
-            "Alternative sources: Cameco (Canada), Orano (Niger), Rosatom (subject to sanctions).",
-        ],
-    }
-
-
-def impact_table(result: ScenarioResult) -> list[dict]:
-    """Flatten a ScenarioResult into a list of display rows."""
-    rows: list[dict] = []
-    for item in result.price_impacts:
-        rows.append({
-            "metric": f"Price: {item['commodity']}",
-            "baseline": item["baseline"],
-            "projected": item["new"],
-            "delta_pct": item["pct"],
-            "unit": _unit_for(item["commodity"]),
-        })
-    rows.append({
-        "metric": "GDP impact",
-        "baseline": 0.0,
-        "projected": result.gdp_bps,
-        "delta_pct": None,
-        "unit": "bps",
-    })
-    rows.append({
-        "metric": "Stockpile / SPR runway",
-        "baseline": None,
-        "projected": result.runway_days,
-        "delta_pct": None,
-        "unit": "days",
-    })
-    return rows
-
-
-def _unit_for(commodity: str) -> str:
-    return {
-        "crude": "USD/bbl",
-        "lng_jkm": "USD/mmbtu",
-        "container_freight": "index",
-        "coking_coal": "USD/t",
-        "neodymium": "USD/kg",
-        "solar_module": "USD/W",
-        "uranium_u3o8": "USD/lb",
-    }.get(commodity, "USD")

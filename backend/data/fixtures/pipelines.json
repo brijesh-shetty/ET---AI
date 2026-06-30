@@ -1,0 +1,184 @@
+{
+  "_source": "Indian energy infrastructure (PNGRB / MoPNG / GAIL / IOC / HPCL / RIL public maps, simplified to trunk-line waypoints). Replaced live by VEDAS API when ingest/vedas.py is wired.",
+  "_asOf": "FY26 snapshot",
+  "oil": [
+    {
+      "id": "iocl_salaya_mathura",
+      "name": "Salaya - Mathura crude pipeline",
+      "operator": "IOC",
+      "type": "crude",
+      "lengthKm": 1850,
+      "throughputMtpa": 25.0,
+      "polyline": [
+        {"lat": 22.30, "lon": 69.60},
+        {"lat": 23.10, "lon": 71.40},
+        {"lat": 23.80, "lon": 73.20},
+        {"lat": 25.10, "lon": 75.00},
+        {"lat": 26.50, "lon": 76.40},
+        {"lat": 27.50, "lon": 77.70}
+      ]
+    },
+    {
+      "id": "hpcl_mundra_panipat",
+      "name": "Mundra - Panipat crude pipeline",
+      "operator": "HPCL",
+      "type": "crude",
+      "lengthKm": 1054,
+      "throughputMtpa": 9.0,
+      "polyline": [
+        {"lat": 22.80, "lon": 69.70},
+        {"lat": 24.00, "lon": 71.50},
+        {"lat": 26.20, "lon": 73.30},
+        {"lat": 28.10, "lon": 75.50},
+        {"lat": 29.39, "lon": 76.97}
+      ]
+    },
+    {
+      "id": "cairn_mangala_bhatinda",
+      "name": "Mangala - Bhatinda crude pipeline",
+      "operator": "Cairn / Vedanta",
+      "type": "crude",
+      "lengthKm": 685,
+      "throughputMtpa": 8.0,
+      "polyline": [
+        {"lat": 25.70, "lon": 71.40},
+        {"lat": 27.30, "lon": 72.80},
+        {"lat": 28.80, "lon": 74.10},
+        {"lat": 30.21, "lon": 74.95}
+      ]
+    },
+    {
+      "id": "nrl_numaligarh_siliguri",
+      "name": "Numaligarh - Siliguri product pipeline",
+      "operator": "NRL",
+      "type": "product",
+      "lengthKm": 654,
+      "throughputMtpa": 1.7,
+      "polyline": [
+        {"lat": 26.62, "lon": 93.80},
+        {"lat": 26.85, "lon": 92.10},
+        {"lat": 26.90, "lon": 90.40},
+        {"lat": 26.73, "lon": 88.43}
+      ]
+    },
+    {
+      "id": "iocl_paradip_haldia_barauni",
+      "name": "Paradip - Haldia - Barauni crude pipeline",
+      "operator": "IOC",
+      "type": "crude",
+      "lengthKm": 1100,
+      "throughputMtpa": 11.0,
+      "polyline": [
+        {"lat": 20.32, "lon": 86.61},
+        {"lat": 21.50, "lon": 87.30},
+        {"lat": 22.05, "lon": 88.07},
+        {"lat": 23.85, "lon": 86.40},
+        {"lat": 25.50, "lon": 85.95}
+      ]
+    },
+    {
+      "id": "bpcl_mumbai_manmad_manglya",
+      "name": "Mumbai - Manmad - Manglya product pipeline",
+      "operator": "BPCL",
+      "type": "product",
+      "lengthKm": 670,
+      "throughputMtpa": 4.6,
+      "polyline": [
+        {"lat": 19.07, "lon": 72.87},
+        {"lat": 20.25, "lon": 74.50},
+        {"lat": 22.30, "lon": 75.80},
+        {"lat": 23.05, "lon": 75.80}
+      ]
+    }
+  ],
+  "gas": [
+    {
+      "id": "gail_hvj_main",
+      "name": "Hazira - Vijaipur - Jagdishpur (HVJ) gas trunk",
+      "operator": "GAIL",
+      "lengthKm": 1750,
+      "capacityMmscmd": 56,
+      "polyline": [
+        {"lat": 21.12, "lon": 72.66},
+        {"lat": 22.30, "lon": 74.00},
+        {"lat": 23.45, "lon": 75.50},
+        {"lat": 24.90, "lon": 77.10},
+        {"lat": 26.05, "lon": 78.30},
+        {"lat": 26.60, "lon": 80.40},
+        {"lat": 26.58, "lon": 81.58}
+      ]
+    },
+    {
+      "id": "ril_east_west",
+      "name": "East-West gas pipeline",
+      "operator": "RGTIL / Pipeline Infrastructure Ltd",
+      "lengthKm": 1389,
+      "capacityMmscmd": 80,
+      "polyline": [
+        {"lat": 16.90, "lon": 82.20},
+        {"lat": 17.50, "lon": 80.10},
+        {"lat": 18.10, "lon": 78.20},
+        {"lat": 19.40, "lon": 76.20},
+        {"lat": 20.80, "lon": 74.30},
+        {"lat": 21.70, "lon": 73.00}
+      ]
+    },
+    {
+      "id": "gail_dabhol_bangalore",
+      "name": "Dabhol - Bangalore gas pipeline",
+      "operator": "GAIL",
+      "lengthKm": 1389,
+      "capacityMmscmd": 16,
+      "polyline": [
+        {"lat": 17.60, "lon": 73.20},
+        {"lat": 16.30, "lon": 74.50},
+        {"lat": 14.80, "lon": 75.80},
+        {"lat": 12.97, "lon": 77.60}
+      ]
+    },
+    {
+      "id": "gail_kkmb",
+      "name": "Kochi - Koottanad - Mangalore - Bangalore gas pipeline",
+      "operator": "GAIL",
+      "lengthKm": 1114,
+      "capacityMmscmd": 16,
+      "polyline": [
+        {"lat": 9.94, "lon": 76.27},
+        {"lat": 10.80, "lon": 76.00},
+        {"lat": 12.20, "lon": 75.20},
+        {"lat": 12.91, "lon": 74.86},
+        {"lat": 13.40, "lon": 75.80},
+        {"lat": 12.97, "lon": 77.60}
+      ]
+    },
+    {
+      "id": "gail_dahej_uran",
+      "name": "Dahej - Uran - Panvel gas pipeline",
+      "operator": "GAIL",
+      "lengthKm": 470,
+      "capacityMmscmd": 12,
+      "polyline": [
+        {"lat": 21.70, "lon": 72.55},
+        {"lat": 20.85, "lon": 72.85},
+        {"lat": 19.60, "lon": 72.85},
+        {"lat": 18.88, "lon": 72.95}
+      ]
+    },
+    {
+      "id": "gail_jhhdpl",
+      "name": "Jagdishpur - Haldia - Bokaro - Dhamra gas pipeline",
+      "operator": "GAIL",
+      "lengthKm": 2655,
+      "capacityMmscmd": 30,
+      "polyline": [
+        {"lat": 26.58, "lon": 81.58},
+        {"lat": 25.60, "lon": 83.00},
+        {"lat": 24.20, "lon": 84.70},
+        {"lat": 23.70, "lon": 86.10},
+        {"lat": 22.30, "lon": 87.20},
+        {"lat": 22.05, "lon": 88.07},
+        {"lat": 20.79, "lon": 87.05}
+      ]
+    }
+  ]
+}

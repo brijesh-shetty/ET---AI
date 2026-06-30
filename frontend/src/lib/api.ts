@@ -203,6 +203,32 @@ export interface TwinDistributionLink {
   path: Array<[number, number]>;
 }
 
+export interface TwinPipeline {
+  id: string;
+  name: string;
+  operator: string;
+  type?: 'crude' | 'product' | string | null;
+  lengthKm?: number | null;
+  throughputMtpa?: number | null;
+  capacityMmscmd?: number | null;
+  polyline: Array<{ lat: number; lon: number }>;
+}
+
+export interface TwinVessel {
+  mmsi: string;
+  name: string;
+  lat: number;
+  lon: number;
+  course: number;
+  speed: number;
+  vesselType: string;
+  cargo: 'crude' | 'lng' | 'lpg' | 'product' | 'chemical' | 'bulk' | 'container' | 'other';
+  flag: string;
+  corridor: Corridor | null;
+  lastSeen: string;
+  anomaly: boolean;
+}
+
 export interface TwinState {
   asOf: string;
   corridors: Array<{
@@ -221,6 +247,9 @@ export interface TwinState {
   supplyRoutes?: TwinSupplyRoute[];
   demandCentres?: TwinDemandCentre[];
   distributionLinks?: TwinDistributionLink[];
+  oilPipelines?: TwinPipeline[];
+  gasPipelines?: TwinPipeline[];
+  vesselPositions?: TwinVessel[];
 }
 
 export function getTwinState(): Promise<TwinState> {
@@ -538,6 +567,121 @@ export function postSlack(payload: SlackPayload): Promise<SlackResponse> {
     method: 'POST',
     url: '/integrations/slack',
     data: payload,
+  });
+}
+
+export interface BaselineEntry {
+  value: number;
+  source: string;
+  refreshed_at?: string;
+}
+
+export interface BaselinesResponse {
+  live: Record<string, BaselineEntry>;
+  operator_overridable: Record<string, { value: number; source: string }>;
+  model_parameters_note: string;
+  asOf: string;
+}
+
+export function getBaselines(): Promise<BaselinesResponse> {
+  return request<BaselinesResponse>({ method: 'GET', url: '/baselines' });
+}
+
+export interface BaselineOverridePayload {
+  spr_cover_days?: number;
+  refinery_runrate_pct?: number;
+  power_stress_index?: number;
+  gdp_growth_pct?: number;
+}
+
+export interface BaselineOverrideResponse {
+  applied: Record<string, number>;
+  errors: Record<string, string>;
+  current: {
+    spr_cover_days: number;
+    refinery_runrate_pct: number;
+    power_stress_index: number;
+    gdp_growth_pct: number;
+  };
+  asOf: string;
+}
+
+export function postBaselineOverride(
+  payload: BaselineOverridePayload,
+): Promise<BaselineOverrideResponse> {
+  return request<BaselineOverrideResponse>({
+    method: 'POST',
+    url: '/baselines/override',
+    data: payload,
+  });
+}
+
+export interface CompoundScenarioRequest {
+  scenarios: Array<{ name: string; intensity: number; duration_days: number }>;
+}
+
+export interface CompoundScenarioBreakdown {
+  scenarioId: string;
+  label: string;
+  intensity: number;
+  durationDays: number;
+  brentUpliftPct: number;
+  lngUpliftPct: number;
+  coalUpliftPct: number;
+  primaryUpliftPct: number;
+  gdpBps: number;
+  refineryDropPp: number;
+  powerStressRise: number;
+  sprRunwayDays: number;
+}
+
+export interface CompoundScenarioResult {
+  kind: 'compound';
+  constituents: Array<{
+    scenarioId: string;
+    intensity: number;
+    durationDays: number;
+    label: string;
+    primaryCommodity: string;
+    primaryCorridor: string;
+  }>;
+  baseline: { brentUsd: number; sprCoverDays: number; importCostUsdM: number };
+  projected: {
+    brentUsd: number;
+    sprCoverDays: number;
+    importCostUsdM: number;
+    gdpImpactBps: number;
+    inflationImpactBps: number;
+    fxImpactInrPerUsd: number;
+    brentUpliftPct: number;
+    lngUpliftPct: number;
+    coalUpliftPct: number;
+    primaryUpliftPct: number;
+    refineryDropPp: number;
+    powerStressRise: number;
+  };
+  timeline: Array<{
+    day: number;
+    brentUsd: number;
+    sprDrawDownMb: number;
+    routeShareCape: number;
+    refineryRunRatePct: number;
+    dieselPriceInr: number;
+    powerStressIndex: number;
+    gdpGrowthPct: number;
+  }>;
+  breakdown: CompoundScenarioBreakdown[];
+  notes: string[];
+  generatedAt: string;
+}
+
+export function postCompoundScenario(
+  body: CompoundScenarioRequest,
+): Promise<CompoundScenarioResult> {
+  return request<CompoundScenarioResult>({
+    method: 'POST',
+    url: '/scenarios/compound',
+    data: body,
   });
 }
 

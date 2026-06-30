@@ -7,6 +7,7 @@ import {
   Popup,
   TileLayer,
   Tooltip,
+  WMSTileLayer,
   useMap,
 } from 'react-leaflet';
 import L from 'leaflet';
@@ -119,7 +120,37 @@ interface Layers {
   corridors: boolean;
   sources: boolean;
   distribution: boolean;
+  oilPipelines: boolean;
+  gasPipelines: boolean;
+  vedasOverlay: boolean;
+  vessels: boolean;
 }
+
+// Color vessels by their cargo class — matches the supply-route palette so the
+// twin reads as one coherent narrative (orange = crude, cyan = LNG, etc.).
+const VESSEL_COLOR: Record<string, string> = {
+  crude: '#f97316',
+  lng: '#22d3ee',
+  lpg: '#a78bfa',
+  product: '#fbbf24',
+  chemical: '#fb923c',
+  bulk: '#94a3b8',
+  container: '#c084fc',
+  other: '#64748b',
+};
+
+const OIL_PIPELINE_COLOR = '#a78bfa';   // soft violet — crude/product
+const GAS_PIPELINE_COLOR = '#22d3ee';   // cyan — natural gas
+const VEDAS_OVERLAY_COLOR = '#f472b6';  // pink — ISRO authoritative overlay tag
+
+// VEDAS GeoServer WMS (powergis_private workspace). GetMap is anonymously
+// accessible and returns transparent PNG tiles. Note the typo in the layer
+// name: "petrolium" (not petroleum) — this is the actual server-side layer.
+const VEDAS_WMS_URL = 'https://vedas.sac.gov.in/secure/geoserver/powergis_private/wms';
+const VEDAS_LAYER_GAS = 'natural_gas_pipeline';
+const VEDAS_LAYER_OIL = 'petrolium_products_pipeline';
+const VEDAS_ATTRIBUTION =
+  '<a href="https://vedas.sac.gov.in/energymap/" target="_blank" rel="noopener">Pipelines © VEDAS / ISRO SAC</a>';
 
 function LayerToggle({
   layers,
@@ -134,6 +165,10 @@ function LayerToggle({
     { key: 'lng', label: 'LNG terminals', color: LNG_COLOR },
     { key: 'ports', label: 'Ports', color: PORT_COLOR },
     { key: 'distribution', label: 'Distribution', color: DEMAND_COLOR },
+    { key: 'oilPipelines', label: 'Oil pipelines', color: OIL_PIPELINE_COLOR },
+    { key: 'gasPipelines', label: 'Gas pipelines', color: GAS_PIPELINE_COLOR },
+    { key: 'vessels', label: 'AIS vessels', color: VESSEL_COLOR.crude },
+    { key: 'vedasOverlay', label: 'VEDAS overlay (ISRO)', color: VEDAS_OVERLAY_COLOR },
     { key: 'sources', label: 'Foreign sources', color: SOURCE_COLOR },
     { key: 'corridors', label: 'Corridors', color: '#f59e0b' },
   ];
@@ -173,6 +208,12 @@ export default function DigitalTwin() {
     corridors: true,
     sources: true,
     distribution: true,
+    oilPipelines: true,
+    gasPipelines: true,
+    // Default OFF — opt-in because tiles come from a slow gov server. Toggle on
+    // during demo to overlay ISRO's authoritative pipeline rendering.
+    vedasOverlay: false,
+    vessels: true,
   });
   const [whatIf, setWhatIf] = useState<WhatIf>({
     corridor: null,
@@ -210,8 +251,12 @@ export default function DigitalTwin() {
   const routes = state?.supplyRoutes ?? [];
   const demandCentres = state?.demandCentres ?? [];
   const distributionLinks = state?.distributionLinks ?? [];
+  const oilPipelines = state?.oilPipelines ?? [];
+  const gasPipelines = state?.gasPipelines ?? [];
+  const vesselPositions = state?.vesselPositions ?? [];
 
   const tileLayer = useMemo(() => tileLayerUrl(), []);
+  const [baseMap, setBaseMap] = useState<'osm' | 'isro'>('osm');
 
   // What-if overrides: when a corridor is simulated closed, its routes + the
   // corridor marker render as closed, and downstream destinations are flagged.
@@ -326,7 +371,35 @@ export default function DigitalTwin() {
         )}
       </div>
 
-      <LayerToggle layers={layers} setLayers={setLayers} />
+      <div className="flex flex-wrap items-center gap-3">
+        <LayerToggle layers={layers} setLayers={setLayers} />
+        <div className="flex items-center gap-1.5 rounded border border-slate-800 bg-slate-900 px-2 py-1 text-[10px] uppercase tracking-wider">
+          <span className="text-slate-500">Base</span>
+          <button
+            type="button"
+            onClick={() => setBaseMap('osm')}
+            className={
+              baseMap === 'osm'
+                ? 'rounded bg-slate-700 px-2 py-0.5 text-slate-100'
+                : 'rounded px-2 py-0.5 text-slate-400 hover:text-slate-200'
+            }
+          >
+            OSM
+          </button>
+          <button
+            type="button"
+            onClick={() => setBaseMap('isro')}
+            className={
+              baseMap === 'isro'
+                ? 'rounded bg-pink-500/30 px-2 py-0.5 text-pink-100'
+                : 'rounded px-2 py-0.5 text-slate-400 hover:text-slate-200'
+            }
+            title="ISRO Temporal RGB composite via VEDAS"
+          >
+            ISRO
+          </button>
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr,260px]">
         <div className="aspect-[16/10] overflow-hidden rounded-lg border border-slate-800 bg-slate-950">
@@ -338,7 +411,44 @@ export default function DigitalTwin() {
             worldCopyJump={true}
           >
             <InvalidateSize refreshKey={corridors.length + refineries.length} />
-            <TileLayer url={tileLayer.url} attribution={tileLayer.attribution} />
+            {baseMap === 'osm' ? (
+              <TileLayer url={tileLayer.url} attribution={tileLayer.attribution} />
+            ) : (
+              // ISRO base map — VEDAS Temporal RGB composite proxied through
+              // our backend (key stays server-side). Anchored at India bounds.
+              <WMSTileLayer
+                url="/api/vedas/tile/rgb"
+                layers="T0S0M1"
+                format="image/png"
+                version="1.3.0"
+                transparent={false}
+                attribution='Imagery © <a href="https://vedas.sac.gov.in/" target="_blank" rel="noopener">VEDAS / ISRO SAC</a> · Resourcesat AWiFS Temporal RGB'
+              />
+            )}
+
+            {/* VEDAS / ISRO authoritative pipeline overlay (WMS GetMap tiles
+                rendered server-side; transparent PNG over the base map). */}
+            {layers.vedasOverlay && (
+              <>
+                <WMSTileLayer
+                  url={VEDAS_WMS_URL}
+                  layers={VEDAS_LAYER_GAS}
+                  format="image/png"
+                  transparent
+                  version="1.1.1"
+                  attribution={VEDAS_ATTRIBUTION}
+                  opacity={0.85}
+                />
+                <WMSTileLayer
+                  url={VEDAS_WMS_URL}
+                  layers={VEDAS_LAYER_OIL}
+                  format="image/png"
+                  transparent
+                  version="1.1.1"
+                  opacity={0.85}
+                />
+              </>
+            )}
 
             {/* Supply routes: source -> corridor -> India */}
             {layers.routes &&
@@ -515,6 +625,81 @@ export default function DigitalTwin() {
                 </Polyline>
               ))}
 
+            {/* VEDAS oil + product pipelines (crude trunk lines) */}
+            {layers.oilPipelines &&
+              oilPipelines.map((p) => (
+                <Polyline
+                  key={p.id}
+                  positions={p.polyline.map((pt) => [pt.lat, pt.lon]) as [number, number][]}
+                  pathOptions={{ color: OIL_PIPELINE_COLOR, weight: 2, opacity: 0.75 }}
+                >
+                  <Tooltip sticky>
+                    <span className="font-mono text-[11px]">
+                      {p.name} · {p.operator}
+                      {p.lengthKm ? ` · ${p.lengthKm} km` : ''}
+                      {p.throughputMtpa ? ` · ${p.throughputMtpa} MMTPA` : ''}
+                    </span>
+                  </Tooltip>
+                </Polyline>
+              ))}
+
+            {/* VEDAS natural-gas pipelines (dashed to distinguish from oil) */}
+            {layers.gasPipelines &&
+              gasPipelines.map((p) => (
+                <Polyline
+                  key={p.id}
+                  positions={p.polyline.map((pt) => [pt.lat, pt.lon]) as [number, number][]}
+                  pathOptions={{ color: GAS_PIPELINE_COLOR, weight: 2, opacity: 0.75, dashArray: '6 4' }}
+                >
+                  <Tooltip sticky>
+                    <span className="font-mono text-[11px]">
+                      {p.name} · {p.operator}
+                      {p.lengthKm ? ` · ${p.lengthKm} km` : ''}
+                      {p.capacityMmscmd ? ` · ${p.capacityMmscmd} MMSCMD` : ''}
+                    </span>
+                  </Tooltip>
+                </Polyline>
+              ))}
+
+            {/* AIS vessel positions — colored by cargo class, with an outlined
+                anomaly highlight on speed-zero / drifting tankers (suspected spoof). */}
+            {layers.vessels &&
+              vesselPositions.map((v) => {
+                const color = VESSEL_COLOR[v.cargo] ?? VESSEL_COLOR.other;
+                return (
+                  <CircleMarker
+                    key={v.mmsi || `${v.lat}_${v.lon}`}
+                    center={[v.lat, v.lon]}
+                    radius={v.anomaly ? 4.5 : 3}
+                    pathOptions={{
+                      color: v.anomaly ? '#fb7185' : color,
+                      fillColor: color,
+                      fillOpacity: 0.7,
+                      weight: v.anomaly ? 2 : 1,
+                    }}
+                  >
+                    <Tooltip direction="top">
+                      <span className="font-mono text-[11px]">
+                        {v.name} · {v.cargo.toUpperCase()} · {v.flag}
+                        {v.anomaly ? ' · ⚠ speed<2kn (possible spoof)' : ''}
+                      </span>
+                    </Tooltip>
+                    <Popup>
+                      <div className="font-mono text-[11px] leading-tight">
+                        <div className="font-semibold">{v.name}</div>
+                        <div>MMSI: {v.mmsi}</div>
+                        <div>{v.vesselType} · flag {v.flag}</div>
+                        <div>
+                          {v.speed.toFixed(1)} kn · course {v.course.toFixed(0)}°
+                        </div>
+                        {v.corridor && <div>Corridor: {CORRIDOR_LABEL[v.corridor]}</div>}
+                        <div>Last seen: {v.lastSeen}</div>
+                      </div>
+                    </Popup>
+                  </CircleMarker>
+                );
+              })}
+
             {/* Domestic demand centres (distribution endpoints) */}
             {layers.distribution &&
               demandCentres.map((h) => (
@@ -559,6 +744,32 @@ export default function DigitalTwin() {
               </div>
               <div className="mt-0.5 text-[10px] text-slate-500">
                 {fmtNumber(totalLngCapacity, 0)} MTPA
+              </div>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-lg border border-slate-800 bg-slate-900 p-3">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500">Oil pipelines</div>
+              <div className="mt-1 text-xl font-semibold tabular-nums text-slate-100">
+                {oilPipelines.length}
+              </div>
+              <div className="mt-0.5 text-[10px] text-slate-500">
+                {fmtNumber(
+                  oilPipelines.reduce((a, p) => a + (p.lengthKm || 0), 0),
+                  0,
+                )} km · VEDAS
+              </div>
+            </div>
+            <div className="rounded-lg border border-slate-800 bg-slate-900 p-3">
+              <div className="text-[10px] uppercase tracking-wider text-slate-500">Gas pipelines</div>
+              <div className="mt-1 text-xl font-semibold tabular-nums text-slate-100">
+                {gasPipelines.length}
+              </div>
+              <div className="mt-0.5 text-[10px] text-slate-500">
+                {fmtNumber(
+                  gasPipelines.reduce((a, p) => a + (p.lengthKm || 0), 0),
+                  0,
+                )} km · VEDAS
               </div>
             </div>
           </div>
@@ -607,6 +818,11 @@ export default function DigitalTwin() {
               <LegendDot color={LNG_COLOR} label="LNG terminal" />
               <LegendDot color={PORT_COLOR} label="Distribution port" />
               <LegendDot color={SOURCE_COLOR} label="Foreign source" />
+              <LegendDot color={OIL_PIPELINE_COLOR} label="Oil pipeline (queryable)" />
+              <LegendDot color={GAS_PIPELINE_COLOR} label="Gas pipeline (queryable, dashed)" />
+              <LegendDot color={VEDAS_OVERLAY_COLOR} label="VEDAS WMS overlay (ISRO)" />
+              <LegendDot color={VESSEL_COLOR.crude} label="Vessel (color = cargo)" />
+              <LegendDot color="#fb7185" label="⚠ AIS anomaly (speed<2 kn)" />
               <div className="mt-1 border-t border-slate-800 pt-1.5">
                 <div className="mb-1 text-slate-500">Route / corridor status</div>
                 <div className="flex flex-wrap gap-2">

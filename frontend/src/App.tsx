@@ -10,6 +10,8 @@ import Scenarios from "@/pages/Scenarios";
 import ScenarioCompare from "@/pages/ScenarioCompare";
 import StressTest from "@/pages/StressTest";
 import Backtest from "@/pages/Backtest";
+import Baselines from "@/pages/Baselines";
+import CompoundScenarios from "@/pages/CompoundScenarios";
 import ImpactCascade from "@/pages/ImpactCascade";
 import ChatDrawer from "@/components/ChatDrawer";
 import CommodityTicker from "@/components/CommodityTicker";
@@ -32,6 +34,7 @@ const NAV_GROUPS: NavGroup[] = [
       { to: "/cascade", label: "Impact cascade" },
       { to: "/scenarios", label: "Scenarios" },
       { to: "/compare", label: "Compare" },
+      { to: "/compound", label: "Compound shocks" },
     ],
   },
   {
@@ -42,6 +45,10 @@ const NAV_GROUPS: NavGroup[] = [
       { to: "/sourcing", label: "Sourcing" },
       { to: "/spr", label: "Strategic reserves" },
     ],
+  },
+  {
+    label: "System",
+    items: [{ to: "/baselines", label: "Data baselines" }],
   },
 ];
 
@@ -185,10 +192,12 @@ export default function App() {
             <Route path="/scenarios" element={<Scenarios />} />
             <Route path="/scenarios/:name" element={<ScenarioRun />} />
             <Route path="/compare" element={<ScenarioCompare />} />
+            <Route path="/compound" element={<CompoundScenarios />} />
             <Route path="/stress-test" element={<StressTest />} />
             <Route path="/backtest" element={<Backtest />} />
             <Route path="/sourcing" element={<Sourcing />} />
             <Route path="/spr" element={<SPR />} />
+            <Route path="/baselines" element={<Baselines />} />
           </Routes>
         </main>
       </div>

@@ -15,16 +15,16 @@ import json
 import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from app.config import get_settings
 from app.engines import scenarios as scenarios_engine
 from app.engines import sourcing as sourcing_engine
 from app.engines import spr_lp as spr_engine
-from app.engines.scenarios import SCENARIOS
+from app.engines.scenarios import SCENARIOS, SCENARIO_SECTOR_TRANSMISSION, project_scenario
 from app.models import Commodity, Corridor
 
 router = APIRouter(tags=["resilience"])
@@ -56,6 +56,14 @@ CORRIDOR_FOR_COMMODITY: dict[str, str] = {
 BASE_BRENT = 82.0
 BASE_SPR_DAYS = 9.5
 BASE_IMPORT_COST_USDM = 320.0
+# Indian pump-price snapshot (IOCL Delhi diesel, FY26).
+# Refreshed at startup from goodreturns.in (see ingest/pump_prices.py).
+BASE_DIESEL_INR = 92.0
+# Administrative baselines (Tier 4 — no machine-readable feed). Promoted to
+# module level so the /api/baselines/override endpoint can mutate them.
+BASE_REFINERY_RUN_PCT = 100.0  # PPAC monthly utilisation report
+BASE_POWER_STRESS_IDX = 20.0   # POSOCO daily grid report
+BASE_GDP_GROWTH_PCT = 6.5      # RBI quarterly bulletin
 
 ALL_COMMODITIES: list[str] = [
     "crude_oil",
@@ -225,6 +233,229 @@ async def healthz() -> dict:
         "liveIngest": settings.allow_live_ingest,
         "fixturesLoaded": len(fixtures),
     }
+
+
+@router.get("/baselines")
+async def baselines() -> dict:
+    """Return currently-loaded data baselines and their sources. Live values
+    come from APIs/scrapes at startup (Brent, FX, copper, pump prices);
+    operator_overridable values are administrative figures (SPR, refinery
+    utilisation, GDP, power stress) which have no machine-readable feed —
+    update them via POST /api/baselines/override. Model coefficients
+    (elasticities, transmission factors) are NOT here — they're calibration
+    constants in docs/assumptions.md."""
+    from app.ingest.baselines import LIVE_BASELINES
+    return {
+        "live": LIVE_BASELINES,
+        "operator_overridable": {
+            "spr_cover_days": {"value": BASE_SPR_DAYS, "source": "ISPRL/MoPNG annual report"},
+            "refinery_runrate_pct": {"value": BASE_REFINERY_RUN_PCT, "source": "PPAC monthly utilisation report (PDF)"},
+            "power_stress_index": {"value": BASE_POWER_STRESS_IDX, "source": "POSOCO daily grid report (PDF)"},
+            "gdp_growth_pct": {"value": BASE_GDP_GROWTH_PCT, "source": "RBI quarterly bulletin"},
+        },
+        "model_parameters_note": "Elasticities, passthrough coefficients and the sector transmission matrix are deliberately not refreshed — they are calibration constants documented in docs/assumptions.md.",
+        "asOf": _now_iso(),
+    }
+
+
+# Only these four are operator-overridable. Everything else is either live or
+# a documented model parameter.
+_OVERRIDABLE_RANGES: dict[str, tuple[float, float, str]] = {
+    "spr_cover_days":       (0.0, 90.0,  "BASE_SPR_DAYS"),
+    "refinery_runrate_pct": (0.0, 110.0, "BASE_REFINERY_RUN_PCT"),
+    "power_stress_index":   (0.0, 100.0, "BASE_POWER_STRESS_IDX"),
+    "gdp_growth_pct":       (-5.0, 12.0, "BASE_GDP_GROWTH_PCT"),
+}
+
+
+@router.post("/baselines/override")
+async def override_baselines(body: dict) -> dict:
+    """Operator override for Tier-4 administrative baselines. Mutates the
+    in-process module globals so subsequent scenario runs use the new values.
+    Lost on process restart — this is a demo-time control, not persistent
+    config. Out-of-range values are rejected; the response echoes back the
+    full applied state so the UI can refresh."""
+    import app.api.routes as _r  # late binding so attribute writes hit the
+                                  # actual module, not a stale local symbol
+    applied: dict[str, float] = {}
+    errors: dict[str, str] = {}
+    for key, (lo, hi, attr) in _OVERRIDABLE_RANGES.items():
+        if key not in body:
+            continue
+        try:
+            value = float(body[key])
+        except (TypeError, ValueError):
+            errors[key] = "not a number"
+            continue
+        if not (lo <= value <= hi):
+            errors[key] = f"out of range [{lo}, {hi}]"
+            continue
+        setattr(_r, attr, value)
+        applied[key] = value
+
+    # Persist so the override survives a backend restart. Best-effort — a
+    # SQLite failure must not break the API response.
+    if applied:
+        from app import persistence
+        for key, value in applied.items():
+            persistence.save_override(key, value)
+
+    return {
+        "applied": applied,
+        "errors": errors,
+        "current": {
+            "spr_cover_days":       _r.BASE_SPR_DAYS,
+            "refinery_runrate_pct": _r.BASE_REFINERY_RUN_PCT,
+            "power_stress_index":   _r.BASE_POWER_STRESS_IDX,
+            "gdp_growth_pct":       _r.BASE_GDP_GROWTH_PCT,
+        },
+        "asOf": _now_iso(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# VEDAS WMS proxy — hides the API key server-side. Frontend Leaflet calls
+# /api/vedas/tile/{product} with standard WMS bbox/width/height; we attach
+# X-API-KEY + Referer and forward to vedas.sac.gov.in. Returns the raw PNG.
+# ---------------------------------------------------------------------------
+_VEDAS_TILE_BASE = "https://vedas.sac.gov.in/vapi/ridam_server3/wms/"
+
+# In-memory tile cache so panning doesn't re-hammer VEDAS for tiles we already
+# fetched this session. Keyed on (product, bbox, width, height). Cleared on
+# process restart — sized small enough that worst-case memory is bounded.
+from collections import OrderedDict
+_VEDAS_TILE_CACHE: "OrderedDict[tuple, bytes]" = OrderedDict()
+_VEDAS_TILE_CACHE_MAX = 256
+
+
+def _vedas_args_rgb() -> str:
+    """Temporal RGB composite over India: R = most-recent 10d window, G = ~1mo
+    earlier, B = ~2mo earlier (all from dataset T3S1P1). VEDAS data has a publish
+    lag of several months, so the date windows are anchored to a known-good
+    interval from the API Centre sample cURL (Sep 2025) — guaranteed to have
+    imagery. Update VEDAS_RGB_R_FROM / R_TO env vars to roll forward as VEDAS
+    publishes newer data."""
+    s = get_settings()
+    return ";".join([
+        "r_merge_method:max", "g_merge_method:max", "b_merge_method:max",
+        "r_dataset_id:T3S1P1", "g_dataset_id:T3S1P1", "b_dataset_id:T3S1P1",
+        f"r_from_time:{s.vedas_rgb_r_from}", f"r_to_time:{s.vedas_rgb_r_to}",
+        f"g_from_time:{s.vedas_rgb_g_from}", f"g_to_time:{s.vedas_rgb_g_to}",
+        f"b_from_time:{s.vedas_rgb_b_from}", f"b_to_time:{s.vedas_rgb_b_to}",
+        "r_max:251", "g_max:251", "b_max:251",
+        "r_index:1", "g_index:1", "b_index:1",
+        "r_min:1", "g_min:1", "b_min:1",
+    ])
+
+
+def _vedas_args_ndvi() -> str:
+    """NDVI temporal mosaic. Anchored to known-good dates from the API Centre
+    sample cURL — update VEDAS_NDVI_FROM / _TO env vars to roll forward."""
+    s = get_settings()
+    return ";".join([
+        "param:NDVI",
+        f"from_time:{s.vedas_ndvi_from}",
+        f"to_time:{s.vedas_ndvi_to}",
+        "datasetId:T3S1P1",
+    ])
+
+
+# NDVI color ramp from the API Centre sample cURL — value:RGBA pairs across
+# 0..255 (NDVI scaled to byte range), with fully-transparent nodata. RGB does
+# not need a styles ramp (the three bands carry the color directly).
+_VEDAS_NDVI_STYLES = (
+    "[0:FFFFFF00:1:f0ebecFF:25:d8c4b6FF:50:ab8a75FF:75:917732FF:100:70ab06FF:"
+    "125:459200FF:150:267b01FF:175:0a6701FF:200:004800FF:255:001901FF];"
+    "nodata:FFFFFF00"
+)
+_VEDAS_LEGEND_OPTIONS = "columnHeight:400;height:100"
+
+_VEDAS_PRODUCTS: dict[str, dict[str, str]] = {
+    "rgb":  {"layers": "T0S0M1", "name": "RIDAM_RGB",   "args_fn": "rgb",  "styles": ""},
+    "ndvi": {"layers": "T5S1M1", "name": "RDSGrdient",  "args_fn": "ndvi", "styles": _VEDAS_NDVI_STYLES},
+}
+
+
+@router.get("/vedas/tile/{product}")
+async def vedas_tile(
+    product: str,
+    bbox: str = Query(..., description="WMS BBOX as 'minLat,minLon,maxLat,maxLon' for WMS 1.3.0 EPSG:4326"),
+    width: int = Query(256, ge=64, le=2048),
+    height: int = Query(256, ge=64, le=2048),
+    crs: str = Query("EPSG:4326"),
+) -> Response:
+    """Proxy a single WMS tile from VEDAS for the given product (rgb|ndvi).
+    The server attaches X-API-KEY + Referer; the frontend never sees the key.
+    Returns raw PNG. 502 on upstream failure, 503 if the key isn't configured."""
+    settings = get_settings()
+    if not settings.vedas_api_key:
+        raise HTTPException(status_code=503, detail="VEDAS_API_KEY not configured on server")
+    if product not in _VEDAS_PRODUCTS:
+        raise HTTPException(status_code=400, detail=f"unknown product '{product}'; use rgb or ndvi")
+
+    cache_key = (product, bbox, width, height, crs)
+    cached = _VEDAS_TILE_CACHE.get(cache_key)
+    if cached is not None:
+        _VEDAS_TILE_CACHE.move_to_end(cache_key)
+        return Response(content=cached, media_type="image/png", headers={"X-Cache": "hit"})
+
+    spec = _VEDAS_PRODUCTS[product]
+    args = _vedas_args_rgb() if spec["args_fn"] == "rgb" else _vedas_args_ndvi()
+    params = {
+        "SERVICE": "WMS",
+        "VERSION": "1.3.0",
+        "REQUEST": "GetMap",
+        "FORMAT": "image/png",
+        "TRANSPARENT": "true",
+        "name": spec["name"],
+        "layers": spec["layers"],
+        "PROJECTION": "EPSG:4326",
+        "CRS": crs,
+        "ARGS": args,
+        "STYLES": spec["styles"],
+        "LEGEND_OPTIONS": _VEDAS_LEGEND_OPTIONS,
+        "WIDTH": width,
+        "HEIGHT": height,
+        "BBOX": bbox,
+        "X-API-KEY": settings.vedas_api_key,
+    }
+    headers = {
+        # VEDAS validates Referer in its CORS/CSP setup; we spoof it server-side.
+        "Referer": "https://vedas.sac.gov.in",
+        "Origin": "https://vedas.sac.gov.in",
+        "User-Agent": "PS2ResilienceProxy/1.0",
+        "Accept": "image/png,image/*;q=0.8,*/*;q=0.5",
+    }
+
+    import httpx
+    try:
+        # VEDAS rendering can be slow for the RGB 3-band composite; 45s ceiling.
+        async with httpx.AsyncClient(timeout=45.0, follow_redirects=True) as client:
+            r = await client.get(_VEDAS_TILE_BASE, params=params, headers=headers)
+            content = r.content
+            content_type = r.headers.get("content-type", "image/png")
+            if r.status_code >= 400:
+                body_preview = content[:500].decode("utf-8", errors="replace")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"VEDAS HTTP {r.status_code}: {body_preview}",
+                )
+    except HTTPException:
+        raise
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"VEDAS transport error ({type(exc).__name__}): {exc!r}",
+        ) from exc
+
+    if not content_type.startswith("image/"):
+        # VEDAS returned an error body (often text/html or text/xml)
+        raise HTTPException(status_code=502, detail=f"VEDAS returned non-image content ({content_type})")
+
+    _VEDAS_TILE_CACHE[cache_key] = content
+    while len(_VEDAS_TILE_CACHE) > _VEDAS_TILE_CACHE_MAX:
+        _VEDAS_TILE_CACHE.popitem(last=False)
+    return Response(content=content, media_type=content_type, headers={"X-Cache": "miss"})
 
 
 # Maps frontend commodity codes to the relevance-matrix keys + a per-corridor
@@ -416,103 +647,16 @@ def _scenario_commodity(name: str) -> str:
     return mapping.get(name, "crude_oil")
 
 
-def _duration_factor(days: int) -> float:
-    return min(1.0, (days / 14.0) ** 0.6)
-
-
-# Per-scenario sector-transmission profile: how a unit of shock intensity
-# propagates into India's *refining* and *power* sectors. Kept explicit and
-# testable in one place (see docs/assumptions.md). Each value is the MAX
-# deflection at full intensity (i=1.0) before duration/within-window scaling.
-#   refinery_runrate_drop_pp : percentage points off refinery run rate (100% base)
-#   power_stress_rise        : points added to the 0-100 power-sector stress index
-# Rationale (why these differ by scenario, not just by the slider):
-#   - Only crude/LNG (refinery feedstock) shocks cut run rates. Coking coal feeds
-#     STEEL, not refineries -> 0. Rare earth / solar / uranium -> 0.
-#   - Power stress is driven by gas-for-power (LNG) and grid-fuel shortfalls.
-#     Coking coal is metallurgical, NOT thermal -> ~0 power impact. Uranium feeds
-#     nuclear (~3% of generation) behind an ~18-month fuel buffer -> small/slow.
-SCENARIO_SECTOR_TRANSMISSION: dict[str, dict[str, float]] = {
-    "hormuz_partial_closure":       {"refinery_runrate_drop_pp": 22.0, "power_stress_rise": 28.0},
-    "opec_emergency_cut":           {"refinery_runrate_drop_pp": 8.0,  "power_stress_rise": 6.0},
-    "red_sea_suspension":           {"refinery_runrate_drop_pp": 5.0,  "power_stress_rise": 8.0},
-    "australia_coking_coal":        {"refinery_runrate_drop_pp": 0.0,  "power_stress_rise": 2.0},
-    "china_rare_earth_curbs":       {"refinery_runrate_drop_pp": 0.0,  "power_stress_rise": 3.0},
-    "china_solar_export_tariff":    {"refinery_runrate_drop_pp": 0.0,  "power_stress_rise": 4.0},
-    "kazakhstan_uranium_disruption":{"refinery_runrate_drop_pp": 0.0,  "power_stress_rise": 6.0},
-}
-
-
 def _project_impact(name: str, intensity: float, duration: int) -> dict:
-    """Project a named scenario's macro impact from its *documented* SCENARIOS
-    params (single source of truth for the elasticities; see
-    docs/assumptions.md). Returns price uplifts, a mechanism-specific GDP drag,
-    SPR runway, and the per-scenario refinery/power deflections that drive the
-    sector trajectories. Non-oil scenarios surface a primary-commodity uplift
-    and still register a GDP drag via their own capex/output channel."""
-    scenario = SCENARIOS[name]
-    p = getattr(scenario, "params", {}) or {}
-    dur = _duration_factor(duration)
-    i = max(0.0, min(1.0, intensity))
-    gpb = p.get("gdp_bps_per_10usd_brent", 18.0)
-
-    brent_uplift = 0.0
-    lng_uplift = 0.0
-    coal_uplift = 0.0
-    primary_uplift = 0.0  # headline price move for the scenario's primary commodity
-    gdp_bps = 0.0
-
-    if name == "hormuz_partial_closure":
-        brent_uplift = 100.0 * p["crude_price_elasticity"] * i * p["crude_volume_share"]
-        lng_uplift = 100.0 * p["lng_price_elasticity"] * i * p["lng_volume_share"]
-    elif name == "opec_emergency_cut":
-        # Realised cut scales linearly with intensity; uplift via documented elasticity.
-        brent_uplift = 100.0 * p["crude_price_elasticity"] * i
-    elif name == "red_sea_suspension":
-        # Rerouting/freight-driven uplift (no physical supply loss) on crude + LNG.
-        brent_uplift = 100.0 * p["crude_price_elasticity"] * i
-        lng_uplift = 100.0 * p["lng_price_elasticity"] * i
-    elif name == "australia_coking_coal":
-        coal_uplift = 100.0 * p["coking_coal_elasticity"] * i * p["australia_share"]
-    elif name == "china_rare_earth_curbs":
-        primary_uplift = 100.0 * p["ree_price_elasticity"] * i * p["china_share"]
-    elif name == "china_solar_export_tariff":
-        primary_uplift = 100.0 * p["module_price_elasticity"] * i * p["china_module_share"]
-    elif name == "kazakhstan_uranium_disruption":
-        primary_uplift = 100.0 * p["uranium_price_elasticity"] * i * p["kazakhstan_share"]
-
-    brent_uplift *= dur
-    lng_uplift *= dur
-    coal_uplift *= dur
-    primary_uplift *= dur
-
-    # GDP drag (negative bps) routed through each scenario's OWN channel.
-    delta_brent = BASE_BRENT * brent_uplift / 100.0
-    if name in ("hormuz_partial_closure", "opec_emergency_cut", "red_sea_suspension"):
-        gdp_bps = -((delta_brent / 10.0) * gpb + lng_uplift * 0.6)
-    elif name == "australia_coking_coal":
-        gdp_bps = -(coal_uplift / 10.0) * p.get("steel_output_drag_bps_per_10pct_price", 4.5)
-    elif name == "china_rare_earth_curbs":
-        gdp_bps = -p.get("gdp_bps_per_pp_ev_capex_drag", 1.2) * p.get("ev_battery_pass_through_pct", 6.0) * i * dur
-    elif name == "china_solar_export_tariff":
-        gdp_bps = -p.get("renewable_capex_drag_bps", 2.5) * i * dur
-    elif name == "kazakhstan_uranium_disruption":
-        gdp_bps = -p.get("npp_capex_drag_bps", 0.8) * i * dur
-
-    spr_runway = max(2.0, BASE_SPR_DAYS - (brent_uplift / 10.0))
-    tx = SCENARIO_SECTOR_TRANSMISSION.get(
-        name, {"refinery_runrate_drop_pp": 0.0, "power_stress_rise": 0.0}
+    """Thin wrapper around the engine. Kept as a route-local name so the rest
+    of the file (and any external callers grepping for it) still works."""
+    return project_scenario(
+        name,
+        intensity,
+        duration,
+        brent_baseline=BASE_BRENT,
+        spr_baseline_days=BASE_SPR_DAYS,
     )
-    return {
-        "brent_uplift_pct": round(brent_uplift, 2),
-        "lng_uplift_pct": round(lng_uplift, 2),
-        "coal_uplift_pct": round(coal_uplift, 2),
-        "primary_uplift_pct": round(primary_uplift, 2),
-        "gdp_bps": round(gdp_bps, 1),
-        "spr_runway_days": round(spr_runway, 1),
-        "refinery_drop_pp": round(tx["refinery_runrate_drop_pp"] * i * dur, 2),
-        "power_stress_rise": round(tx["power_stress_rise"] * i * dur, 2),
-    }
 
 
 @router.post("/scenarios/{name}/run")
@@ -542,11 +686,13 @@ async def run_scenario_endpoint(name: str, body: dict | None = None) -> dict:
     inflation_bps = round(gdp_bps * 0.85, 1)
     fx_impact = round(brent_uplift_pct * 0.18, 2)
 
-    # Baselines for the PS-required trajectories.
-    BASE_REFINERY_RUN = 100.0  # % of nameplate run rate
-    BASE_DIESEL = 92.0  # Rs/L domestic pump
-    BASE_POWER_STRESS = 20.0  # 0-100 power-sector stress index
-    BASE_GDP_GROWTH = 6.5  # % annualised GDP trajectory
+    # Baselines for the PS-required trajectories. Brent + import bill + diesel
+    # are live-refreshed at startup (see ingest/baselines.py); the three
+    # administrative indices below are operator-overridable via /api/baselines/override.
+    BASE_REFINERY_RUN = BASE_REFINERY_RUN_PCT
+    BASE_DIESEL = BASE_DIESEL_INR
+    BASE_POWER_STRESS = BASE_POWER_STRESS_IDX
+    BASE_GDP_GROWTH = BASE_GDP_GROWTH_PCT
 
     # Trajectory deflections come from the scenario's transmission profile, not
     # the slider alone: a uranium shock barely touches refineries, a Hormuz
@@ -582,7 +728,7 @@ async def run_scenario_endpoint(name: str, body: dict | None = None) -> dict:
             "Re-route Qatari LNG via Cape window; confirm Dahej slot availability.",
         ]
 
-    return {
+    response = {
         "scenarioId": name,
         "request": {
             "scenarioId": name,
@@ -619,11 +765,269 @@ async def run_scenario_endpoint(name: str, body: dict | None = None) -> dict:
         "generatedAt": _now_iso(),
     }
 
+    # Audit-log the run. Best-effort — never break the response on a write
+    # failure (e.g. read-only filesystem, locked DB).
+    try:
+        from app import persistence
+        persistence.log_scenario_run(
+            scenario_id=name,
+            intensity=intensity,
+            duration_days=duration,
+            projected_brent_usd=response["projected"]["brentUsd"],
+            gdp_impact_bps=response["projected"]["gdpImpactBps"],
+            payload=response,
+        )
+    except Exception:
+        pass
+
+    return response
+
+
+@router.post("/scenarios/compound")
+async def compound_scenarios(body: dict) -> dict:
+    """Compose 2-4 simultaneous scenarios into a single combined projection.
+
+    Composition rules (documented inline; see docs/assumptions.md for the
+    underlying justification):
+      * brent_uplift_pct, lng_uplift_pct, coal_uplift_pct, primary_uplift_pct
+            -> additive across scenarios, capped at 250%
+      * gdp_bps                 -> additive (drags compound through different
+                                   channels: import bill + steel + capex + etc.)
+      * refinery_drop_pp        -> MAX across scenarios. Refinery capacity is
+                                   a single physical bottleneck; the worst
+                                   feedstock shock dominates.
+      * power_stress_rise       -> SUM across scenarios, capped at 80 points.
+                                   Different shocks hit different fuel sources
+                                   (gas vs. coal vs. nuclear vs. transmission),
+                                   so they accumulate.
+      * spr_runway_days         -> MIN across scenarios. Whichever shock burns
+                                   the SPR fastest wins.
+
+    Request:
+      {"scenarios": [{"name": str, "intensity": float, "duration_days": int}, ...]}
+      duration_days defaults to the scenario's default_duration_days if absent.
+
+    Response: same envelope as POST /api/scenarios/{name}/run, with the
+    combined timeline + a `breakdown` array showing each constituent
+    scenario's contribution to each metric, and `notes` documenting the
+    composition rules used.
+    """
+    spec_list = body.get("scenarios") if isinstance(body, dict) else None
+    if not isinstance(spec_list, list) or not spec_list:
+        raise HTTPException(status_code=400, detail="body.scenarios must be a non-empty list")
+    if len(spec_list) > 4:
+        raise HTTPException(status_code=400, detail="at most 4 simultaneous scenarios allowed")
+
+    constituents: list[dict] = []
+    impacts: list[dict] = []
+    max_duration = 0
+    for spec in spec_list:
+        if not isinstance(spec, dict):
+            raise HTTPException(status_code=400, detail="each scenario entry must be an object")
+        name = spec.get("name")
+        if name not in SCENARIOS:
+            raise HTTPException(status_code=400, detail=f"unknown scenario: {name}")
+        sc = SCENARIOS[name]
+        intensity = float(spec.get("intensity", spec.get("shockSeverity", sc.default_intensity)))
+        duration = int(spec.get("duration_days", spec.get("shockDurationDays", sc.default_duration_days)))
+        if duration <= 0:
+            raise HTTPException(status_code=400, detail=f"duration_days must be > 0 for {name}")
+        max_duration = max(max_duration, duration)
+        impact = _project_impact(name, intensity, duration)
+        constituents.append({
+            "scenarioId": name,
+            "intensity": intensity,
+            "durationDays": duration,
+            "label": _humanize(name),
+            "primaryCommodity": _scenario_commodity(name),
+            "primaryCorridor": _scenario_corridor(name),
+        })
+        impacts.append(impact)
+
+    # Composition per the documented rules.
+    def _cap(value: float, ceiling: float) -> float:
+        return ceiling if value > ceiling else value
+
+    brent_sum = _cap(sum(i["brent_uplift_pct"] for i in impacts), 250.0)
+    lng_sum = _cap(sum(i["lng_uplift_pct"] for i in impacts), 250.0)
+    coal_sum = _cap(sum(i["coal_uplift_pct"] for i in impacts), 250.0)
+    primary_sum = _cap(sum(i["primary_uplift_pct"] for i in impacts), 250.0)
+    gdp_sum = sum(i["gdp_bps"] for i in impacts)
+    refinery_drop = max((i["refinery_drop_pp"] for i in impacts), default=0.0)
+    power_sum = _cap(sum(i["power_stress_rise"] for i in impacts), 80.0)
+    spr_runway = min((i["spr_runway_days"] for i in impacts), default=BASE_SPR_DAYS)
+
+    projected_brent = BASE_BRENT * (1.0 + brent_sum / 100.0)
+    inflation_bps = round(gdp_sum * 0.85, 1)
+    fx_impact = round(brent_sum * 0.18, 2)
+
+    # Per-day combined timeline (same shape ScenarioRun consumes).
+    refinery_pp = refinery_drop
+    diesel_rise_pct = brent_sum * 0.55
+    power_stress_rise = power_sum
+    gdp_drag_pp = abs(gdp_sum) / 100.0
+    duration = max(1, max_duration)
+    timeline: list[dict] = []
+    for day in range(0, duration + 1, max(1, duration // 12)):
+        progress = day / max(1, duration)
+        ramp = min(1.0, progress * 1.4)
+        recovery = max(0.0, (progress - 0.7) / 0.3) if progress > 0.7 else 0.0
+        gdp_effect = gdp_drag_pp * ramp * (1.0 - 0.4 * recovery)
+        timeline.append({
+            "day": day,
+            "brentUsd": round(BASE_BRENT + (projected_brent - BASE_BRENT) * ramp, 2),
+            "sprDrawDownMb": round(0.85 * ramp, 3),
+            "routeShareCape": round(0.42 * ramp, 3),
+            "refineryRunRatePct": round(BASE_REFINERY_RUN_PCT - refinery_pp * ramp, 1),
+            "dieselPriceInr": round(BASE_DIESEL_INR * (1 + diesel_rise_pct / 100.0 * ramp), 1),
+            "powerStressIndex": round(min(100.0, BASE_POWER_STRESS_IDX + power_stress_rise * ramp), 1),
+            "gdpGrowthPct": round(BASE_GDP_GROWTH_PCT - gdp_effect, 2),
+        })
+
+    # Per-scenario breakdown for the UI's contribution table.
+    breakdown = [
+        {
+            "scenarioId": c["scenarioId"],
+            "label": c["label"],
+            "intensity": c["intensity"],
+            "durationDays": c["durationDays"],
+            "brentUpliftPct": i["brent_uplift_pct"],
+            "lngUpliftPct": i["lng_uplift_pct"],
+            "coalUpliftPct": i["coal_uplift_pct"],
+            "primaryUpliftPct": i["primary_uplift_pct"],
+            "gdpBps": i["gdp_bps"],
+            "refineryDropPp": i["refinery_drop_pp"],
+            "powerStressRise": i["power_stress_rise"],
+            "sprRunwayDays": i["spr_runway_days"],
+        }
+        for c, i in zip(constituents, impacts)
+    ]
+
+    response = {
+        "kind": "compound",
+        "constituents": constituents,
+        "baseline": {
+            "brentUsd": BASE_BRENT,
+            "sprCoverDays": BASE_SPR_DAYS,
+            "importCostUsdM": BASE_IMPORT_COST_USDM,
+        },
+        "projected": {
+            "brentUsd": round(projected_brent, 2),
+            "sprCoverDays": round(spr_runway, 1),
+            "importCostUsdM": round(BASE_IMPORT_COST_USDM * (1 + brent_sum / 100.0), 1),
+            "gdpImpactBps": round(gdp_sum, 1),
+            "inflationImpactBps": inflation_bps,
+            "fxImpactInrPerUsd": fx_impact,
+            "brentUpliftPct": round(brent_sum, 2),
+            "lngUpliftPct": round(lng_sum, 2),
+            "coalUpliftPct": round(coal_sum, 2),
+            "primaryUpliftPct": round(primary_sum, 2),
+            "refineryDropPp": round(refinery_drop, 2),
+            "powerStressRise": round(power_stress_rise, 2),
+        },
+        "timeline": timeline,
+        "breakdown": breakdown,
+        "notes": [
+            "Price uplifts (brent/lng/coal/primary) ADDITIVE across scenarios, capped at 250% to prevent runaway compounding.",
+            "GDP-bps additive — drags route through different channels (import bill, steel, EV capex, renewable capex, etc.).",
+            "Refinery run-rate drop = MAX across scenarios (single physical bottleneck).",
+            "Power stress rise SUMMED, capped at 80 (different fuel sources accumulate).",
+            "SPR runway = MIN across scenarios (worst-case feedstock burn wins).",
+        ],
+        "generatedAt": _now_iso(),
+    }
+    return response
+
+
+@router.get("/scenario-runs")
+async def list_scenario_runs(limit: int = 20) -> dict:
+    """Return the N most-recent scenario runs from the persistence layer.
+    Used by the audit/history view to show what scenarios have been simulated."""
+    from app import persistence
+    return {
+        "runs": persistence.list_scenario_runs(limit=limit),
+        "asOf": _now_iso(),
+    }
+
+
+@router.get("/scenario-runs/{run_id}")
+async def get_scenario_run(run_id: int) -> dict:
+    """Return the full payload of one stored run (for replay/audit)."""
+    from app import persistence
+    row = persistence.get_scenario_run(run_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"scenario_run {run_id} not found")
+    return row
+
+
+def _classify_vessel_cargo(vessel_type: str) -> str:
+    """Map AIS vessel_type tokens to the cargo classes the frontend colors."""
+    vt = (vessel_type or "").upper()
+    if "LNG" in vt:
+        return "lng"
+    if "LPG" in vt:
+        return "lpg"
+    if "OIL" in vt or "TANKER" in vt and "CHEMICAL" not in vt and "PRODUCT" not in vt:
+        return "crude"
+    if "PRODUCT" in vt:
+        return "product"
+    if "CHEMICAL" in vt:
+        return "chemical"
+    if "BULK" in vt:
+        return "bulk"
+    if "CONTAINER" in vt:
+        return "container"
+    return "other"
+
+
+def _vessel_corridor(lat: float, lon: float) -> Optional[str]:
+    """Cheap geographic classifier — which corridor's water is this vessel in?
+    Used to color/filter the map; corridor=None means open ocean / coastal."""
+    # Rough bounding boxes, NOT precise geofences.
+    if 24.0 < lat < 28.0 and 54.0 < lon < 58.0:
+        return "hormuz"
+    if 11.0 < lat < 16.0 and 41.5 < lon < 45.0:
+        return "bab_el_mandeb"
+    if -2.0 < lat < 7.0 and 99.0 < lon < 105.0:
+        return "malacca"
+    if 8.0 < lat < 22.0 and 110.0 < lon < 122.0:
+        return "south_china_sea"
+    if -36.0 < lat < -30.0 and 15.0 < lon < 25.0:
+        return "cape_of_good_hope"
+    if 27.0 < lat < 32.0 and 31.0 < lon < 34.0:
+        return "suez"
+    return None
+
 
 @router.get("/digital-twin/state")
 async def twin_state() -> dict:
     vessels_fixture = _load_fixture("vessels.json") or []
     vessel_count = len(vessels_fixture) if isinstance(vessels_fixture, list) else 0
+    # Normalise the fixture into the TwinVessel shape the frontend renders.
+    # Anomaly flag: speed below 2 kn often indicates AIS spoofing or drift.
+    vessel_positions: list[dict] = []
+    if isinstance(vessels_fixture, list):
+        for v in vessels_fixture[:80]:
+            try:
+                lat = float(v.get("lat"))
+                lon = float(v.get("lon"))
+            except (TypeError, ValueError):
+                continue
+            speed = float(v.get("speed") or 0.0)
+            vessel_positions.append({
+                "mmsi": str(v.get("mmsi") or ""),
+                "name": v.get("name") or "Unknown",
+                "lat": lat,
+                "lon": lon,
+                "course": float(v.get("course") or 0.0),
+                "speed": speed,
+                "vesselType": v.get("vessel_type") or "UNKNOWN",
+                "cargo": _classify_vessel_cargo(v.get("vessel_type") or ""),
+                "flag": v.get("flag") or "UNKNOWN",
+                "corridor": _vessel_corridor(lat, lon),
+                "lastSeen": v.get("last_seen") or "",
+                "anomaly": speed < 2.0,
+            })
 
     corridor_status = {
         "hormuz": "congested",
@@ -670,10 +1074,18 @@ async def twin_state() -> dict:
 
     network = _india_supply_network(corridor_status)
 
+    # VEDAS pipeline overlay (live when configured; fixture otherwise).
+    from app.ingest.vedas import fetch_pipelines
+    try:
+        pipelines = await fetch_pipelines()
+    except Exception:
+        pipelines = {"oilPipelines": [], "gasPipelines": []}
+
     return {
         "asOf": _now_iso(),
         "corridors": corridors_out,
         "vessels": vessel_count or 60,
+        "vesselPositions": vessel_positions,
         "storage": {
             "sprFillPct": 78.5,
             "lngTerminalFillPct": 64.2,
@@ -686,6 +1098,8 @@ async def twin_state() -> dict:
         "supplyRoutes": network["supplyRoutes"],
         "demandCentres": network["demandCentres"],
         "distributionLinks": network["distributionLinks"],
+        "oilPipelines": pipelines["oilPipelines"],
+        "gasPipelines": pipelines["gasPipelines"],
     }
 
 

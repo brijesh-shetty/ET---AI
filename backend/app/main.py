@@ -59,6 +59,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         slack_enabled=bool(settings.slack_webhook_url),
         gdelt_enabled=settings.gdelt_enabled,
     )
+    # Initialise the persistence layer (creates SQLite tables if missing) and
+    # restore any operator overrides that survived the prior process.
+    try:
+        from app import persistence
+        persistence.init_db()
+        persistence.apply_persisted_overrides()
+    except Exception as exc:
+        log.warning("startup.persistence_failed", error=str(exc))
+
+    # Pull live spot baselines (Brent / LNG / copper / USD-INR / import bill)
+    # before the app starts handling requests, so the first response already
+    # reflects live spot prices instead of FY26 calibration snapshots.
+    try:
+        from app.ingest.baselines import refresh_live_baselines
+        snapshot = await refresh_live_baselines()
+        log.info("startup.baselines_refreshed", live=snapshot)
+    except Exception as exc:
+        log.warning("startup.baselines_failed", error=str(exc))
     yield
     log.info("shutdown.complete")
 

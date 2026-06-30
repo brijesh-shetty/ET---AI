@@ -64,7 +64,12 @@ async def fetch_prices(commodity: Commodity, days: int = 30) -> list[dict]:
 
     if commodity in _EIA_SERIES and settings.eia_api_key:
         try:
-            return await _fetch_eia(commodity, days)
+            eia = await _fetch_eia(commodity, days)
+            if eia:
+                return eia
+            # Empty payload (stale series, weekend, lagging publish) — fall
+            # through to Alpha Vantage rather than handing back nothing.
+            log.info("prices.eia_empty_fallthrough", commodity=commodity.value)
         except httpx.HTTPError as exc:
             log.warning("prices.eia_failed", commodity=commodity.value, error=str(exc))
 
