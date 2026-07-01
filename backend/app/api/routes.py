@@ -689,11 +689,12 @@ def _live_score_dict(corridor: str, commodity: str, sig: dict, drivers: list[str
 
 @router.get("/scores")
 async def get_scores(commodity: str | None = Query(default=None)) -> list[dict]:
-    """Live per-corridor x commodity risk scores computed from real signals.
+    """Live per-corridor x commodity risk scores derived from real signals.
 
-    Scores are derived from GDELT events, vessel positions, sanctions, and
-    price volatility — not hardcoded. Falls back to the seeded baseline only
-    if the live signal computation fails entirely.
+    Serves the scheduler's cached snapshot (refreshed every 10 minutes) so a
+    dashboard request returns in <100ms instead of blocking on 6 NewsAPI +
+    sanctions + GDELT calls. Fresh recompute only kicks in on the very first
+    request before the scheduler has produced its first snapshot.
     """
     pairs = _SCORE_PAIRS
     if commodity:
@@ -701,8 +702,16 @@ async def get_scores(commodity: str | None = Query(default=None)) -> list[dict]:
 
     try:
         from app.engines import live_scores
+        from app import scheduler
 
-        sig = await live_scores.compute_live_corridor_signals()
+        # Prefer the scheduler's warm snapshot — it's the exact same data
+        # compute_live_corridor_signals would produce, just already computed.
+        sig = scheduler.last_snapshot()
+        if not sig:
+            # First hit before the initial refresh finished — compute inline
+            # so the dashboard isn't left empty.
+            sig = await live_scores.compute_live_corridor_signals()
+
         drivers_cache = {
             c: live_scores.drivers_from_signals(c, sig[c]) for c in sig
         }
@@ -3167,15 +3176,29 @@ async def chat(body: dict | None = None) -> dict:
     }
 
 
+# 5-minute in-memory cache for the live commodity overrides. Prevents the
+# /api/commodities dashboard poll (60s cadence) from hammering EIA + Alpha
+# Vantage on every request — those calls take 10-15s round-trip and would
+# blow past the axios 20s browser timeout.
+_EIA_CACHE: dict = {"value": None, "at": 0.0}
+_EIA_CACHE_TTL_SECONDS = 300
+
+
 async def _live_eia_overrides() -> dict[str, dict]:
     """In live mode with an EIA key, fetch real Brent + Henry Hub series.
 
     Returns a dict keyed by commodity code -> {last, prev, unit}. Empty if
     live mode is off, no key, or the EIA call fails (graceful fixture fall-back).
+    Cached for 5 minutes to keep the dashboard responsive.
     """
+    import time
     settings = get_settings()
     if not (settings.allow_live_ingest and settings.eia_api_key):
         return {}
+    now = time.time()
+    cached = _EIA_CACHE.get("value")
+    if cached is not None and (now - float(_EIA_CACHE.get("at") or 0.0)) < _EIA_CACHE_TTL_SECONDS:
+        return cached
     out: dict[str, dict] = {}
     try:
         from app.ingest import commodity_prices as cp
@@ -3189,7 +3212,11 @@ async def _live_eia_overrides() -> dict[str, dict]:
                 unit = series[-1].get("unit", "")
                 out[code] = {"last": float(last), "prev": float(prev), "unit": unit}
     except Exception:  # noqa: BLE001
+        _EIA_CACHE["value"] = out
+        _EIA_CACHE["at"] = now
         return out
+    _EIA_CACHE["value"] = out
+    _EIA_CACHE["at"] = now
     return out
 
 
